@@ -1,0 +1,14 @@
+{
+  "name": "rob-knight",
+  "description": "Rob Knight's agent loop (Loop v3) for Claude Code.",
+  "owner": {
+    "name": "Rob Knight"
+  },
+  "plugins": [
+    {
+      "name": "agent-workflows",
+      "source": "./plugins/agent-workflows",
+      "description": "Prepare and run Loop v3: a root session works a Backlog.md board through pinned subagent lanes until it writes its closeout."
+    }
+  ]
+}

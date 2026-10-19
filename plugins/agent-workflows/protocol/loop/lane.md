@@ -1,0 +1,76 @@
+# Lane rules (v3 template)
+
+The planner copies this file to `codex/loop<N>/LANE.md`, fills the `<...>` slots from the charter
+and `LOOP.md`, and appends `LOOP.md`'s `## Lane brief` section verbatim. Every lane reads it once.
+
+## Your job
+
+You own one task in your own worktree. Implement it, prove it, and hand back an uncommitted
+candidate. You never push, never merge, never edit the Backlog unless your brief makes you a board
+lane, and never touch credentials or live systems.
+
+- Worktree: `git worktree add <worktree root>/loop<N>-<lane> origin/main` unless the brief gives
+  one. Work only there, by absolute path (`git -C <worktree>`, absolute paths for reads and edits);
+  never call `EnterWorktree`. Evidence and logs go to `<run dir>/<lane>/`.
+- Find code by meaning, not text: ask the language server for definitions, references and
+  callers (the LSP tool, or `gopls` MCP tools where present) and trust its answer; for how,
+  where or why something works, start with `jg "<question>" <repo root>` (jevgrep) where it is
+  installed. Grep is for literal text: strings, keys, log lines, file names.
+- Stay inside the brief's Scope. Another live lane may be in the files listed under "Others live
+  in": keep your change inside your own functions there. For a root-owned file, write the hunk to
+  `<run dir>/<lane>/<file>.hunk.patch` and say so; do not apply it.
+- A guarded path the brief did not name: stop and return `blocked`.
+- Prove it red first: a check that fails on the base for the right reason, then passes on your
+  tree. A check that passes on its first run against unchanged code asserts nothing.
+- Never weaken, skip, delete or special-case a test, fixture or baseline. A test changes only when
+  intended behaviour changed; name it in the return.
+- Gate: `<gate command>`, run through `<gate route>`; run heavy legs nowhere else. Gate once per
+  (tree, base); a red that also fails on base is not yours: list both. A repaired tree is a new
+  tree: rerun the gate before returning `complete`. Running the gate route is never a live-system
+  touch, even when it reaches a build host.
+- CodeRabbit: `coderabbit review --agent --base-commit <base>` once on your final candidate, with
+  `--include-untracked` so new files are reviewed. Fix every `critical`/`major`. After such a fix only, one delta review with
+  `--base-commit <last reviewed SHA>`. Skip it for docs, comments, declarative config and dependency
+  bumps. Exit 0 is not clean; no `complete` line is a failure.
+- Long waits (a gate slot, a test run) are fine: your prompt cache lasts an hour. Keep each Bash
+  call under its 10-minute limit and re-invoke on expiry.
+- A decision the brief does not cover: stop and return the question with your recommendation.
+  Never invent copy, an interface or a requirement.
+- Never message the root with progress or status; they go in `return.md`. A question that blocks
+  you is a return (`blocked`, the question in `questions`), not a message.
+- Write your full final message to `<run dir>/<lane>/return.md` before handing back. If your
+  harness refuses a second hand-back after a resume, send that message (the `lane-return` block
+  first) to the agent that dispatched you; if that is refused too, end: the root reads `return.md`.
+- When the root sends a repair round, fix exactly what it names, re-prove, return again.
+
+## Handing back
+
+Write the candidate patch, naming each new file you created (bulk staging such as `git add .` is
+blocked):
+
+    git add -N -- <each new file> && git diff --binary <base> > <run dir>/<lane>/candidate.patch
+    shasum -a 256 <run dir>/<lane>/candidate.patch
+
+Put full logs, findings and questions in `<run dir>/<lane>/return.md`. Your final message starts
+with exactly this block (compact JSON, at most 1,800 characters), then at most a few prose lines:
+
+````
+```lane-return
+{"v":3,"lane":"<id>","task":"<ID>","status":"complete|partial|blocked|failed",
+ "base":"<full SHA>","worktree":"<abs path>","patch":"<abs path>","patch_sha256":"<hex>",
+ "check":"<exact command>","exit":<int>|null,"tail":"<last lines, at most 40>",
+ "coderabbit":{"ran":true|false,"major":<n>,"unreviewed":<n>}|null,
+ "questions":["<short; details in return.md>"]}
+```
+````
+
+Compose and board lanes return the same block with `"sha"` (their local commit or stack tip) in
+place of `patch` and `patch_sha256`. They commit locally with explicit pathspecs
+(`git commit -- <paths>`), one commit per task with a `Task: <ID>` trailer, and never push.
+
+## Run facts
+
+- Repository: `<owner/repo>` at `<abs checkout>`; worktree root `<path>`.
+- Run dir: `<abs path to codex/loop<N>>`.
+- Gate: `<command>`; gate route: `<recipe or slot pool>`.
+- Guarded paths: `<list>`.
