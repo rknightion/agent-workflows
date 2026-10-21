@@ -14,8 +14,8 @@ Read these each time and never restate them here:
 
 - `${CLAUDE_PLUGIN_ROOT}/protocol/loop/planner.md`: the preparation steps. Follow it.
 - `${CLAUDE_PLUGIN_ROOT}/protocol/loop/charter.md`, `lane.md`, `contract.md` (section 1 names the files)
-  and the chosen `harness-<name>.md` (launch block, routes): `harness-pi.md`, `harness-claude.md`,
-  `harness-codex.md` or `harness-claude-openai.md`.
+  and the chosen `harness-<name>.md` (launch block, routes): `harness-pi.md`, `harness-claude.md`
+  or `harness-codex.md`.
 - The repository's `LOOP.md` (tier, gate, guards, traps) and its `## Lane brief`.
 - Tools: `loop-lint`, on the Bash tool's PATH while this plugin is enabled
   (`${CLAUDE_PLUGIN_ROOT}/bin/loop-lint`). `loop-lint queue` reads the board through `backlog`.
@@ -40,7 +40,7 @@ Read these each time and never restate them here:
    with your recommendation and alternatives. Freeze the answers under `## Decisions already made`.
    Engineering detail inside approved scope is not an owner question.
 5. **Harness.** The owner names it; otherwise `claude`. This plugin supplies the Claude Code
-   hooks and lane agents; the `codex`, `pi` and `claude-openai` harnesses need their own
+   hooks and lane agents; the `codex` and `pi` harnesses need their own
    launchers and roles. Copy the root model and launch command from the harness file; change
    them only on the owner's instruction.
 6. **Standing.** Standing grants are optional and none by default. With none, write
@@ -68,5 +68,4 @@ Standing: <abs standing path> sha256=<hex>
 ```
 
 Name the closeout path once, absolute, with no trailing period. "You are the root" plus that one path
-is how every hook recognises the run. `claude-openai` also names `harness-claude.md`: copy its launch
-block exactly.
+is how every hook recognises the run.

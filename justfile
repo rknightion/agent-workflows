@@ -18,14 +18,14 @@ fmt:
 fmt-check:
     just --fmt --check
 
-# Compile the hook scripts and loop-lint, and check whitespace.
+# Compile the hook scripts, the tools and loop-lint, and check whitespace.
 [group('check')]
 lint:
-    python3 -m py_compile plugins/agent-workflows/scripts/*.py
+    python3 -m py_compile plugins/agent-workflows/scripts/*.py plugins/agent-workflows/tools/*/*.py
     python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' plugins/agent-workflows/bin/loop-lint
     git diff --check
 
-# Drive the hooks, the launch template and loop-lint against temporary repositories.
+# Drive the hooks, the launch template, loop-lint and dsreview against temporary repositories.
 [group('check')]
 test:
     python3 -m unittest discover -s tests

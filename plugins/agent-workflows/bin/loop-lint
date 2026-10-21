@@ -40,7 +40,7 @@ CHARTER_MAX = 8192
 FIRST_WAVE_ROWS = 20
 CHARTER_KEYS = ('harness', 'root', 'aim', 'priorities', 'exclude', 'lanes', 'gate', 'gate-route', 'standing',
                 'overnight')
-HARNESSES = ('claude', 'codex', 'pi', 'claude-openai')
+HARNESSES = ('claude', 'codex', 'pi')
 CHARTER_HEADER = re.compile(r'^# Charter: (\S+) loop(\d+)$')
 CHARTER_FILE = re.compile(r'^charter-.*-loop(\d+)\.md$')
 PLACEHOLDER = re.compile(r'(?<!\S)<[A-Za-z][^<>]*>(?!\S)')

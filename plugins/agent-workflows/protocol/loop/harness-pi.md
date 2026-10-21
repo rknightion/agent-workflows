@@ -13,23 +13,31 @@ Read at launch with the contract and the charter.
       and <abs charter path> in full. Write <abs closeout path> last, then reconcile and reply (contract section 12).
       Standing: <abs path> sha256=<hex>
 
-- Launch runs the preflight and snapshots the remote for the closeout audit. A cross-repo charter
+- Launch runs the preflight and snapshots the remote for the audit. A cross-repo charter
   needs `loop-pi-preflight <repo>` and `loop-pi-audit add <repo>` first.
 - Continuation arms on "You are the root" plus one closeout path. A wrong host or repository, a
   changed charter, or a `Standing:` line that differs from the charter's `standing:` key refuses the
   launch. A Standing file that is missing or fails its sha256 still arms, with no grants and a
   `loop-standing-rejected` incident.
 - **Recovery is automatic.** After a provider error, a stalled request or a request-ceiling abort,
-  continuation resumes the root with backoff. Authentication, quota, policy and context-length
-  errors stop the run and raise an incident instead. Never relaunch yourself.
+  continuation resumes the root. A quota error gets two retries (owner input resets), then
+  stops; authentication, policy and context-length errors stop at once. Never relaunch yourself.
 - The loop-state extension records dispatch, return, watch and heartbeat events in
   `codex/state-<date>-loop<N>.jsonl` automatically. You write none of them; `loop-state digest
-  <log> --json` gives live lanes after compaction. The state log and lane-patch capture parse the
-  brief's first non-empty line, `Lane: <id> · Task: <ID> (<title>) · Tier: routine|guarded`, with
-  the middle dot `·` as separator and none inside the title. A header that does not parse drops
-  that lane from both.
-- Start at 6 to 8 live lanes and raise the count only while your own model time stays under about
-  half of wall time.
+  <log> --json` gives live lanes. The state log and lane-patch capture parse the brief's first
+  non-empty line, `Lane: <id> · Task: <ID> (<title>) · Tier: routine|guarded` (no `·` inside the
+  title); a header that does not parse drops that lane from both.
+
+## Root load
+
+- `LANES.md` stays the contract's one line per live lane: add it with one `printf '%s\n' ... >>` at
+  dispatch and delete it at land or park, in a `bash` call you already make (never one running
+  `loop-gate-lock`). Never rewrite it or add status prose; `DECISIONS.md` is append-only. In
+  `QUEUE.md` move rows between sections in place.
+- Combine the routine mandatory section 5 reviews since the last one into one `reviewer` lane
+  (`Task: none (land review)`) after landing; guarded reviews stay before landing, with the
+  security brief. Edit the run `LANE.md` CodeRabbit line so task lanes skip it; the root, or the
+  compose lane its brief names, runs it once on each landing's composed tree.
 
 ## Routes
 
@@ -45,16 +53,18 @@ A missing agent is a harness fault: stop and say so.
 
 ## Dispatch and repairs
 
-- One async `subagent {agent, task}` per lane, the complete brief as `task`. No `workflow`, no
-  model or thinking override.
+- Every `worker`, `senior` and `senior-escalation` lane: async
+  `subagent {agent, task, worktree: true}`, the complete brief as `task`, with
+  `Landing: returns candidate` on its own line (the tree is kept only then). loop-pi keeps the tree
+  and runs the lane in it, so a bare `loop-gate-lock <name>` gates it (`cd … &&` is refused).
+  Scout, reviewer: `subagent {agent, task}`. No `workflow`, no model or thinking override.
 - 19 native async slots shared by parents and children; keep about 7 free. Only `senior` may spawn
   children (`scout`, `worker`, `reviewer`), and only when the brief grants a count. Depth 2 at most.
-- Repair rounds and answers resume the same lane's run with the new evidence (the `subagent`
-  resume call the loop-pi README names). Never poll a lane's status between wakes.
-- **Lanes never push.** The guard refuses every lane push; only the root's `bash` runs
-  `git push origin main`.
-- Isolation needs a clean `HEAD`. Completion keeps lane trees; `/loop-closeout` removes only
-  verified clean landed trees, and lane patches are copied to `$LOOP_PI_RUN_DIR/lane-patches/`.
+- Repair rounds and answers resume the same lane's run with new evidence (`subagent` `resume`, which
+  keeps its tree). Never poll a lane's status between wakes.
+- **Lanes never push** (the guard refuses it); only the root's `bash` runs `git push origin main`.
+- A new `worktree: true` lane needs a clean main checkout (ignored files are fine). `/loop-closeout`
+  removes only verified clean landed trees; lane patches go to `$LOOP_PI_RUN_DIR/lane-patches/`.
 
 ## Waits
 
@@ -62,15 +72,16 @@ A missing agent is a harness fault: stop and say so.
   with `WAITING: <what> until <deadline>`; continuation arms a timer for it.
 - Root CI and release waits: a bounded, quiet `watch_start` that exits on every terminal state.
   Lanes use `watch_process` with `deadline_s` up to 3600.
-- `LOOP.md`'s optional `ci-status` replaces `gh` reads as the contract describes.
-- Heavy gates run only through `loop-gate-lock <name>` rows under `LOOP.md` `## Mutexes`.
+- `LOOP.md`'s optional `ci-status` replaces `gh` reads.
+- Heavy gates run only through `loop-gate-lock <name>` rows under `LOOP.md` `## Mutexes`. One name
+  runs one leg at a time, so a composed gate's parallel legs (contract section 6) need a row each,
+  each started under its own watcher. If one is refused, run the legs in turn and say so.
 - Give any `bash` call that can run past 15 minutes a `timeout`, or run it under `watch_start`.
 
 ## Owner questions
 
-While the owner is present, put the question in a message that also makes a tool call, and append
-it to `QUESTIONS.md`. An idle-lane wake notice (`Inspect subagent updates above.`) is not an owner
-control.
+While the owner is present, ask in a message that also makes a tool call and append the question to
+`QUESTIONS.md`. An idle-lane wake notice (`Inspect subagent updates above.`) is not an owner control.
 
 ## Closeout sweep
 
@@ -78,10 +89,9 @@ control.
 2. Push landed work with the root's `bash` (`git push origin main`).
 3. Stop your watchers (`watch_stop`) and timers (`wake_cancel`), then run
    `loop-pi-audit closeout --run-dir "$LOOP_PI_RUN_DIR" --push-log "$LOOP_PI_RUN_DIR/push-log.jsonl"`
-   (`/loop-closeout` is the owner's command; you cannot call it). Report a nonzero result under
-   `## Notes`, naming each flagged move the charter authorised. This skips the lane-tree sweep and
-   teardown `/loop-closeout` adds: remove no lane tree yourself; list them under `## Notes` and ask
-   the owner there to run `/loop-closeout`.
+   and report a nonzero result under `## Notes`, naming each flagged move the charter authorised.
+   Remove no lane tree yourself: list them under `## Notes` and ask the owner to run
+   `/loop-closeout`, which you cannot call.
 4. Write the closeout file, then run the contract's reconcile and reply (section 12, steps 5 and 6).
 
 ## Turn endings

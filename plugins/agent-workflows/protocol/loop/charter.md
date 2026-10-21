@@ -6,7 +6,7 @@ states intent and authority; the board holds the tasks. `loop-lint charter` chec
 ```markdown
 # Charter: <repo> loop<N>
 
-harness:    claude | codex | pi | claude-openai
+harness:    claude | codex | pi
 host:       <optional machine name; pi refuses the launch on any other host>
 root:       <model> / <effort>
 aim:        <one or two sentences: what this run is for>

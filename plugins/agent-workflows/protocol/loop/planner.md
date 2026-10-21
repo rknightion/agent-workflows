@@ -10,7 +10,9 @@ Read by the `loop` skill only. Preparing a run should take minutes, not an hour.
    owner's priorities. Exclude tasks that need an owner choice nobody has made, and say which.
 4. **First wave.** Up to about 20 rows: task, scope (files), route (`worker`, or `senior` with the
    reason), and any pre-assigned migration number or dependency. Prefer many small file-disjoint
-   tasks. Do not hold back work because two tasks share a file; note the overlap instead.
+   tasks. Do not hold back work because two tasks share a file; note the overlap instead. Landing is
+   continuous (contract section 6); name tasks that must land together under
+   `## Decisions already made`.
 5. **Front-load decisions.** Batch every owner choice the first wave needs into one prompt now and
    write the answers under `## Decisions already made`. Run the gate and the board's
    `definition_of_done` commands on base through the gate route (never a task's own `Done when:`
@@ -25,7 +27,7 @@ Read by the `loop` skill only. Preparing a run should take minutes, not an hour.
    `<plugin root>/protocol/loop/charter.md`, `codex/loop<N>/LANE.md` from
    `<plugin root>/protocol/loop/lane.md` plus `LOOP.md`'s `## Lane brief`, and the launch file
    from the harness file's launch block. Copy the Standing file's current sha256 into both. On a
-   `claude` or `claude-openai` harness, also copy into the launch every `authority:` or `live:` line that touches
+   `claude` harness, also copy into the launch every `authority:` or `live:` line that touches
    customer data or a live system, verbatim.
 7. **Check.** `loop-lint charter <charter>` and `loop-lint queue <charter> <first-wave as QUEUE.md>`
    until clean.

@@ -18,21 +18,22 @@ preparation date):
 | `codex/loop<N>/QUEUE.md` | root only | ready order, holds, landing order |
 | `codex/loop<N>/LANES.md` | root | one line per live lane: id, task, agent or run id, worktree |
 | `codex/loop<N>/DECISIONS.md` | root | rulings, amendments, parks, tripwire calls; append-only (a new entry supersedes an old one by naming it) |
+| `codex/loop<N>/STATE.md` | root | what recovery reads: owner mode, current wave, each ruling or hold live or queued work depends on (one line, written after its `DECISIONS.md` entry, citing its id); pruned of landed and parked work at each landing; at most about 8 KB |
 | `codex/loop<N>/QUESTIONS.md` | root | open owner questions with a recommendation each |
-| `codex/loop<N>/BATCH<k>.md` | root | one landing batch: rows, order, rulings to apply |
+| `codex/loop<N>/BATCH<k>.md` | root | one landing: rows taken, order, rulings to apply |
 | `codex/loop<N>/<LANE>/` | lane | `candidate.patch`, `return.md`, logs and evidence |
 | `codex/closeout-<date>-loop<N>.md` | root | terminal closeout (section 12) |
 
 The launch names the closeout path and says "You are the root". Hooks and continuation
 recognise a run by that pair; keep both exact. Amend the frozen charter only
-by a `DECISIONS.md` entry (or an owner-approved addendum file beside it).
+by a `DECISIONS.md` entry (or an owner-approved addendum beside it).
 
 ## 2. The queue
 
 - The backlog is the queue. Start from the charter's first wave, then keep `QUEUE.md` fed from the
   board in the charter's priority order. A scout may draft waves; only the root writes ready rows.
 - `QUEUE.md` has three sections: `## Ready` (ordered rows, the task ID first in each), `## Hold`
-  (task, reason) and `## Landing` (the next batches). Live lanes are in `LANES.md`, not here.
+  (task, reason) and `## Landing` (accepted, to land). Live lanes are in `LANES.md`, not here.
 - Before each wave run `loop-lint queue <charter> <QUEUE.md>`: nothing excluded, nothing Done,
   nothing labelled `needs-owner`. A re-scope of an exclusion needs an owner ruling or a recorded
   decision citing one.
@@ -55,9 +56,9 @@ by a `DECISIONS.md` entry (or an owner-approved addendum file beside it).
 - The root does live reads (databases, logs, provider APIs) and puts the exact cause and response
   shapes in the brief. Lanes stay credential-free and work against fixtures.
 - Routes are in the harness file: `worker` by default; `senior` only when the brief says why
-  (unknown cause, frozen seam or shared contract, data-model call, composing a batch); `scout` for
-  read-only mapping, sweeps, wave drafts and log reduction. A discovery brief names `jg` (jevgrep)
-  for behavioural questions where it is installed, and the language server for symbols.
+  (unknown cause, frozen seam or shared contract, data-model call, composing a landing); `scout` for
+  read-only mapping, sweeps, wave drafts and log reduction. A discovery brief names the language
+  server for symbols and `jg` (jevgrep), scoped to a package, for behaviour questions.
 
 Brief, at most about 2 KB. Keep the first line exactly in this form on every lane: harnesses parse
 it. A lane with no single task writes `Task: none (<purpose>)`. When the task implements a grammar
@@ -81,34 +82,52 @@ or format this contract or the charter fixes, quote that line in `Why:`.
   `PAUSED` or in a blocking owner question), stop repairing. Record in
   `DECISIONS.md` one of: a named new approach, a split, a `senior` escalation, or a park with
   options. In overnight mode a second trip parks the task until the owner is back.
-- A task is Done only after it lands in a pushed batch whose composed gate was green (section 6).
+  On privacy, redaction or scrubbing work count failed review rounds, not classes; after the
+  second, ask the owner what residual is acceptable before another round.
+- A task is Done only once pushed after a green composed gate (section 6).
 
 ## 5. Review
 
-- Routine tier: the lane's gate plus CodeRabbit. A `reviewer` lane is **mandatory** when the task
-  touches concurrency or locking; privacy, redaction or scrubbing; authorisation or tenant scope;
-  user-visible copy against approved decks; when its only proof is a test; on its second repair
-  round; above about 15 changed files; or when CodeRabbit did not run. Otherwise add one whenever
-  you doubt a return.
-- Guarded tier (section 8): a `reviewer` with the security brief before landing, then CodeRabbit.
+- Routine tier: the lane's gate, CodeRabbit and `dsreview` (lane rules) in place of the
+  routine `reviewer`. A `reviewer` lane is **mandatory** when dsreview gave no verdict, on a
+  dsreview major the lane disputes, on the second repair round, or when CodeRabbit did not run;
+  add one if you doubt a return. A routine one runs after landing, covering each task landed
+  since the last, before closeout; fix forward.
+- Guarded tier (section 8): a `reviewer` with the security brief before landing, then CodeRabbit;
+  plus the lane's dsreview; any blocker blocks. Log reviewer/dsreview disagreements in
+  `DECISIONS.md`.
 - A change after a verdict invalidates it: review the delta only. Reviewers report; they never edit.
+  The one exception: a repair that only applies the minor fixes a verdict named may queue
+  unreviewed; the landing's patch read confirms that and drops anything more for delta review.
 - CodeRabbit for code, once per final candidate: fix every `critical`/`major`, name the rest you
   leave. One delta review only after such a fix. Exit 0 is not clean; no `complete` line is a
   failure; `unreviewedFileCount > 0` is partial. Skip docs, comments, declarative config and
-  dependency bumps, and say so.
+  dependency bumps, and say so. Where the charter or `LOOP.md` marks its quota scarce, run it only
+  on guarded or substantial candidates; a missing run then does not alone mandate a `reviewer`.
 
 ## 6. Landing
 
-- Land in batches. The root, or a `senior` compose lane working from `BATCH<k>.md`, applies accepted
-  candidates to current main as one commit per task carrying a `Task: <ID>` trailer, regenerates
-  generated files once, and gates that exact tree in CI mode on the charter's gate route. The root
-  pushes it unchanged as soon as it is green, unless a section 10 hold applies.
+- Land continuously. Queue each accepted candidate under `QUEUE.md` `## Landing` at once; it never
+  waits for siblings. Guarded candidates queue only after their reviewer PASS. One landing runs at a
+  time, back to back: the root, or a `senior` compose lane working from `BATCH<k>.md`, takes
+  everything queued at its start, applies it to current main as one commit per task carrying a
+  `Task: <ID>` trailer, regenerates generated files once, and gates that exact tree in CI mode on
+  the charter's gate route. A candidate that conflicts or turns the gate red is dropped from that
+  landing and goes back to its lane; the rest land without it. The root pushes the green tree
+  unchanged at once, unless a section 10 hold applies, and starts the next landing on what queued
+  meanwhile.
 - Where the charter forbids the board's IDs in a public repository, its trailer carries a neutral
   alias (`Task: loop<N>-<lane>`, never a board ID or private name). Before closeout, land a commit
-  in the board's private repository that consumes the work (a lock bump, for example) with one
+  in the board's private repository that consumes the work (a lock bump) with one
   `Task: <ID>` trailer per delivered task, and record the alias map in `DECISIONS.md`.
 - A compose lane also reads every applied patch: assertions kept, no test weakened, scope respected.
-- Heavy gates run only through the gate route the charter and `LOOP.md` name.
+- Heavy gates run only through the gate route the charter and `LOOP.md` name. Run a composed gate's
+  independent legs in parallel from the one compose worktree, never one after another and never
+  from copies of it. Start them only once every candidate and regeneration is committed and
+  `git status --porcelain` is empty: a gate route may upload uncommitted files, so legs from a
+  dirty tree can each gate a different partial tree. Edit nothing in that
+  worktree until every leg has exited; a fix after a red leg is a new commit and a re-gate of the
+  legs it touches. The harness file says how to start the legs.
 - Gate once per (tree, base). Classify every red against base: one that also fails on base is not
   the candidate's; record both lists. A new failure is red.
 - Hosted CI does not block landing. Watch main's CI for each pushed SHA with a background watcher
@@ -119,17 +138,18 @@ or format this contract or the charter fixes, quote that line in `Why:`.
 
 ## 7. The owner
 
-- **Owner present** (the default): keep working. Put a question in chat with your recommendation
-  and append it to `QUESTIONS.md`; act on the answer when it comes. A blocking question tool is
-  allowed only when nothing else is waiting on you: process every queued return and dispatch every
-  ready task first.
+- **Owner present** (the default from launch): put decisions to the owner as they arise,
+  recommendation first, and append each to `QUESTIONS.md`. A blocking question tool holds every
+  lane return and dispatch until answered, so call it only at a boundary: process every queued
+  return and dispatch every ready task first, then batch the questions into one call.
 - Small design, copy and seam calls the evidence decides are yours: rule, record them in
   `DECISIONS.md` marked for ratification, and keep going.
-- **Overnight mode** starts only when the owner says "overnight mode" (optionally "until HH:MM",
-  the owner's local time; record it in UTC in `DECISIONS.md`).
-  Then ask nothing and never call a blocking question tool: hold questions in `QUESTIONS.md`, rule
-  what you can, park what you cannot, and work the charter's `overnight:` mandate. It ends only at
-  the stated time or on "I'm back", "I'm awake" or "overnight off". A
+- **Overnight mode** starts when the owner says they are leaving: "overnight mode", "I'm away",
+  "AFK", "heading out" (optionally "until HH:MM", the owner's local time; record it in UTC in
+  `DECISIONS.md`). Then ask nothing and never call a blocking question tool: hold questions in
+  `QUESTIONS.md`, rule what you can, park what you cannot, and work the charter's `overnight:`
+  mandate. It ends only at the stated time or on "I'm back", "I'm awake" or "overnight off"; then,
+  after the reconcile, put every held `QUESTIONS.md` item to the owner in batched prompts first. A
   steering, corrective or answering message does not end it: apply it and carry on.
 - **Controls.** An owner clause leading with a control phrase is a control; quoted, conditional or
   questioning mentions, tool output and notifications never are. Precedence: emergency stop >
@@ -210,9 +230,9 @@ name stops and returns.
   waiting turn with `WAITING: <what> until <YYYY-MM-DDTHH:MM[:SS]Z>`.
 - An owner-only wait ends at its deadline: with no answer, ready task or live lane by then, park
   its items as `owner` and close out.
-- After compaction or a provider error, recover: re-read `QUEUE.md`,
-  `LANES.md`, `DECISIONS.md` and the harness's live listing, reconcile, continue. Never start a
-  fresh root. Do the same reconcile whenever a blocking call or an owner answer returns (an owner
+- After compaction or a provider error, recover: re-read `QUEUE.md`, `LANES.md`, `STATE.md` and
+  the harness's live listing (search `DECISIONS.md` only for an id they cite), reconcile,
+  continue. Never start a fresh root. Do the same reconcile whenever a blocking call or an owner answer returns (an owner
   control in the answer comes first): every return that queued meanwhile and every lane in
   `LANES.md` gets a next step before new work.
 - Close out on `close out`, an emergency stop, or when no ready unexcluded work remains in the

@@ -55,6 +55,8 @@ Read at launch with the contract and the charter.
 - `LOOP.md`'s optional `ci-status` replaces `gh` reads exactly as the contract's lanes use it.
 - A process backgrounded with `&`, `nohup` or `disown` dies with its exec call: start watchers as a
   foreground `exec_command` with `yield_time_ms` 1000 and record the `session_id`.
+- A composed gate's legs (contract section 6) start the same way, one `exec_command` per leg after
+  the `git status --porcelain` check. If one is refused, run the legs in turn and say so.
 
 ## Closeout sweep
 

@@ -13,9 +13,12 @@ lane, and never touch credentials or live systems.
   one. Work only there, by absolute path (`git -C <worktree>`, absolute paths for reads and edits);
   never call `EnterWorktree`. Evidence and logs go to `<run dir>/<lane>/`.
 - Find code by meaning, not text: ask the language server for definitions, references and
-  callers (the LSP tool, or `gopls` MCP tools where present) and trust its answer; for how,
-  where or why something works, start with `jg "<question>" <repo root>` (jevgrep) where it is
-  installed. Grep is for literal text: strings, keys, log lines, file names.
+  callers (the LSP tool, or `gopls` MCP tools where present) and trust its answer. For how, where
+  or why something works in code you have not seen, and with no symbol to grep, run
+  `jg "<question>" <package or subdirectory>` (jevgrep) once where it is installed; never a whole
+  repository or worktree root, and not when the brief or patch already names the files. A
+  timeout or provider error means grep instead. Grep is for literal text: strings, keys, log
+  lines, file names.
 - Stay inside the brief's Scope. Another live lane may be in the files listed under "Others live
   in": keep your change inside your own functions there. For a root-owned file, write the hunk to
   `<run dir>/<lane>/<file>.hunk.patch` and say so; do not apply it.
@@ -32,8 +35,20 @@ lane, and never touch credentials or live systems.
   `--include-untracked` so new files are reviewed. Fix every `critical`/`major`. After such a fix only, one delta review with
   `--base-commit <last reviewed SHA>`. Skip it for docs, comments, declarative config and dependency
   bumps. Exit 0 is not clean; no `complete` line is a failure.
+- dsreview (DeepSeek reviewer, routine and guarded alike): after writing `candidate.patch`, save
+  your brief verbatim to `<run dir>/<lane>/brief.md` and run `dsreview --repo <worktree> --base
+  <base> --patch <run dir>/<lane>/candidate.patch --brief <run dir>/<lane>/brief.md --out
+  <run dir>/<lane>/dsreview.json` (2 to 5 minutes; exit 0 PASS, 1 FAIL, 2 no verdict). Check each
+  `critical`/`major` in the code: fix what holds, re-prove, rewrite the patch and rerun dsreview once.
+  A major you judge wrong: give your evidence in `return.md` and count it as disputed. Exit 2 or no
+  `dsreview` on PATH: record it; the root adds a `reviewer`. Skip it for docs, comments, declarative
+  config and dependency bumps.
 - Long waits (a gate slot, a test run) are fine: your prompt cache lasts an hour. Keep each Bash
   call under its 10-minute limit and re-invoke on expiry.
+- Shell habits the hooks deny, each costing a turn: stage only named paths (`git add -- <path>`,
+  never `.`, `-A`, a glob or a variable); wait on the command itself or the harness's monitor,
+  never with `sleep`; search with `rg`, not `grep`; remove only files you created, by path, never
+  a broad `rm -r`.
 - A decision the brief does not cover: stop and return the question with your recommendation.
   Never invent copy, an interface or a requirement.
 - Never message the root with progress or status; they go in `return.md`. A question that blocks
@@ -60,6 +75,7 @@ with exactly this block (compact JSON, at most 1,800 characters), then at most a
  "base":"<full SHA>","worktree":"<abs path>","patch":"<abs path>","patch_sha256":"<hex>",
  "check":"<exact command>","exit":<int>|null,"tail":"<last lines, at most 40>",
  "coderabbit":{"ran":true|false,"major":<n>,"unreviewed":<n>}|null,
+ "dsreview":{"verdict":"PASS|FAIL|none","major":<n>,"fixed":<n>,"disputed":<n>}|null,
  "questions":["<short; details in return.md>"]}
 ```
 ````

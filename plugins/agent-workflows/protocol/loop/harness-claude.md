@@ -77,6 +77,10 @@ The launch file's first line is the command; the message follows it:
 - `LOOP.md`'s optional `ci-status` command replaces `gh` reads: substitute the full SHA for `{sha}`,
   sleep 60 s between reads, stop on `success` or `failure`, bound the loop by `ci-max-minutes`
   (default 30).
+- A composed gate's legs (contract section 6): after the `git status --porcelain` check, start
+  each leg as its own `run_in_background` Bash command against the compose worktree by absolute
+  path, one log per leg. If the classifier refuses the fan-out, record the denial, run the legs
+  one after another and say so in the return or `DECISIONS.md`.
 - Bash calls time out at 10 minutes: run anything longer in the background. Never a foreground
   `sleep` over 60 seconds.
 

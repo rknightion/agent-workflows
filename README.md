@@ -32,7 +32,12 @@ Everything lives in `plugins/agent-workflows/`.
   ordinary sessions, and both let the call through on any fault of their own.
 - `bin/loop-lint`: the charter, queue and `LOOP.md` linter. While the plugin is enabled it is on
   the Bash tool's PATH, so the skill, the root and the lanes run it as `loop-lint`.
-- `protocol/`: the contract, the four harness files, the charter and lane templates, the planner
+- `tools/dsreview/`: `dsreview`, a code reviewer for lanes. It sends a candidate change and its
+  brief to DeepSeek Flash through Cloudflare AI Gateway, lets the model read the repository through
+  read-only tools, and prints a PASS or FAIL verdict as JSON. On 59 replayed reviews it caught as
+  many defects as Opus reviewer lanes (8 of 11 each) with no false blocks, at about $0.05 a review
+  against about $1.09. It is optional and needs your own gateway: see `tools/dsreview/README.md`.
+- `protocol/`: the contract, the three harness files, the charter and lane templates, the planner
   and the board setup guide. See `protocol/README.md`.
 
 ## Requirements
@@ -46,6 +51,9 @@ Everything lives in `plugins/agent-workflows/`.
 - Recommended: `just`, because the protocol's gate and verification examples are `just` recipes
   (any gate command works), and the GitHub CLI `gh` for the online `LOOP.md` checks
   (`loop-lint loopmd --offline` skips them).
+- Optional: `dsreview` (in this plugin, Python 3.12 or later and a Cloudflare AI Gateway with a
+  DeepSeek key). The lane template asks lanes to run it on each candidate; set it up as its README
+  says or delete that rule from your `LANE.md`.
 - Optional: the CodeRabbit CLI. The lane template asks lanes to run it on each candidate; delete
   that rule from your `LANE.md` if you do not use it.
 
@@ -139,7 +147,8 @@ grants go in the charter's `authority:` lines.
 ## Development
 
 `just check` runs the syntax checks and the tests in `tests/`, which drive the hooks, the launch
-template and `loop-lint` against temporary repositories. `claude plugin validate .` checks the
+template and `loop-lint` against temporary repositories, and `dsreview` against a local fake
+gateway. `claude plugin validate .` checks the
 manifests.
 
 ## Where this comes from

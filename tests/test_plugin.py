@@ -61,7 +61,9 @@ class Manifests(unittest.TestCase):
     def test_hook_commands_name_scripts_that_exist(self):
         hooks = json.loads(read(PLUGIN, "hooks", "hooks.json"))["hooks"]
         commands = [h["command"] for event in hooks.values() for group in event for h in group["hooks"]]
-        self.assertEqual(len(commands), 2)
+        # Two loop hooks (brief header, fan-out continue) plus the tmux title-state hook on each
+        # session lifecycle event; every command must name a script shipped in this tree.
+        self.assertEqual(len({re.search(r'scripts/[^"]+', c).group(0) for c in commands}), 3)
         for command in commands:
             script = re.search(r'"\$\{CLAUDE_PLUGIN_ROOT\}/([^"]+)"', command).group(1)
             self.assertTrue(os.path.isfile(os.path.join(PLUGIN, script)), script)
@@ -78,7 +80,7 @@ class LaunchTemplate(unittest.TestCase):
         for rel in paths:
             rel = rel.rstrip(".")
             if "<name>" in rel:
-                for name in ("claude", "claude-openai", "codex", "pi"):
+                for name in ("claude", "codex", "pi"):
                     self.assertTrue(os.path.isfile(os.path.join(PLUGIN, rel.replace("<name>", name))), rel)
             else:
                 self.assertTrue(os.path.exists(os.path.join(PLUGIN, rel)), rel)

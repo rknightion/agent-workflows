@@ -7,8 +7,8 @@ them from this directory.
 - `loop/contract.md`: what every root obeys at run time: run files, queue, dispatch, review,
   landing, authority and close-out.
 - `loop/harness-claude.md`: Claude Code, the harness this plugin supplies (hooks and lane agents).
-- `loop/harness-claude-openai.md`, `loop/harness-codex.md` and `loop/harness-pi.md`: the same
-  protocol on Claude Code through a GPT gateway, on Codex and on pi. They are here for reference;
+- `loop/harness-codex.md` and `loop/harness-pi.md`: the same
+  protocol on Codex and on pi. They are here for reference;
   this plugin does not supply their launchers, agents or hooks.
 - `loop/charter.md` and `loop/lane.md`: the templates for a run's charter and its lane rules.
 - `loop/planner.md`: how a run is prepared. Only the `loop` skill reads it.
