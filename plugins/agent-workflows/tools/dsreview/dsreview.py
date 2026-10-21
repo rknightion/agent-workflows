@@ -377,7 +377,11 @@ def main(argv=None):
         out = {'verdict': None, 'reviewer': 'dsreview', 'error': f'{type(e).__name__}: {e}', 'findings': []}
     text = json.dumps(out, indent=2)
     if args.out:
-        args.out.write_text(text + '\n')
+        try:
+            args.out.write_text(text + '\n')
+        except OSError as e:  # an unwritten verdict is no verdict (exit 2), never FAIL
+            out = {**out, 'verdict': None, 'error': f'could not write --out {args.out}: {e}'}
+            text = json.dumps(out, indent=2)
     print(text)
     return {'PASS': 0, 'FAIL': 1}.get(out.get('verdict'), 2)
 

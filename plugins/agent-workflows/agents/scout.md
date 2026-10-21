@@ -31,5 +31,6 @@ You cannot write files, so your answer goes in your final message. It starts wit
  "base":"<full SHA>","worktree":"<abs path>","patch":"<abs path>","patch_sha256":"<hex>",
  "check":"<exact command>","exit":<int>|null,"tail":"<last lines, at most 40>",
  "coderabbit":{"ran":true|false,"major":<n>,"unreviewed":<n>}|null,
+ "dsreview":{"verdict":"PASS|FAIL|none","major":<n>,"fixed":<n>,"disputed":<n>}|null,
  "questions":["<short; details in return.md>"]}
 ```

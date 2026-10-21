@@ -279,6 +279,17 @@ class Review(Case):
         self.assertIn('LIMIT = 3', user)
 
 
+    def test_unwritable_out_is_no_verdict_not_fail(self):
+        repo = make_repo(self.tmp)
+        out = self.tmp / 'missing-dir' / 'review.json'
+        with Gateway(tool_then_final()) as gateway:
+            result = run(self.tmp, gateway.url, '--repo', str(repo), '--brief', '-', '--out', str(out), stdin='Sum all items.')
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        report = json.loads(result.stdout)
+        self.assertIsNone(report['verdict'])
+        self.assertIn('could not write --out', report['error'])
+
+
 class Tools(Case):
     def test_tools_are_confined_to_the_candidate_tree(self):
         module = load()
