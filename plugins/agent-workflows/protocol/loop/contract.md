@@ -7,7 +7,7 @@ charter > `Standing:` file > `LOOP.md` > this contract.
 
 ## 1. Run identity and files
 
-Every file of run N lives in the repository's machine-local `codex/` directory (`<date>` is the UTC
+Run N's files live in the repository's machine-local `codex/` (`<date>` is the UTC
 preparation date):
 
 | File | Written by | Purpose |
@@ -58,7 +58,7 @@ by a `DECISIONS.md` entry (or an owner-approved addendum beside it).
 - Routes are in the harness file: `worker` by default; `senior` only when the brief says why
   (unknown cause, frozen seam or shared contract, data-model call, composing a landing); `scout` for
   read-only mapping, sweeps, wave drafts and log reduction. A discovery brief names the language
-  server for symbols and `jg` (jevgrep), scoped to a package, for behaviour questions.
+  server for symbols and `jg`, scoped to a package, for behaviour questions.
 
 Brief, at most about 2 KB. Keep the first line exactly in this form on every lane: harnesses parse
 it. A lane with no single task writes `Task: none (<purpose>)`. When the task implements a grammar
@@ -78,72 +78,114 @@ or format this contract or the charter fixes, quote that line in `Why:`.
   the test diff; check claims against git and the gate output proportionate to risk.
 - Repairs go back to the same live lane (the harness names the call) with the new evidence.
 - **Convergence tripwire.** When a task has had two failed rounds that each opened a new class of
-  finding, or four hours have passed since its first dispatch (excluding time spent
-  `PAUSED` or in a blocking owner question), stop repairing. Record in
-  `DECISIONS.md` one of: a named new approach, a split, a `senior` escalation, or a park with
-  options. In overnight mode a second trip parks the task until the owner is back.
+  finding, or four hours have passed since its first dispatch (excluding `PAUSED`
+  time and blocking owner questions), stop repairing. Record in `DECISIONS.md` the
+  first that fits, in either owner mode: a named new approach, a split, a `senior` escalation;
+  park with options only when none can progress. A second trip parks it `owner`.
   On privacy, redaction or scrubbing work count failed review rounds, not classes; after the
   second, ask the owner what residual is acceptable before another round.
-- A task is Done only once pushed after a green composed gate (section 6).
+- A task is Done only once pushed (in `pr` mode, merged) after a green composed gate (section 6).
 
 ## 5. Review
 
-- Routine tier: the lane's gate, CodeRabbit and `dsreview` (lane rules) in place of the
-  routine `reviewer`. A `reviewer` lane is **mandatory** when dsreview gave no verdict, on a
-  dsreview major the lane disputes, on the second repair round, or when CodeRabbit did not run;
-  add one if you doubt a return. A routine one runs after landing, covering each task landed
-  since the last, before closeout; fix forward.
-- Guarded tier (section 8): a `reviewer` with the security brief before landing, then CodeRabbit;
-  plus the lane's dsreview; any blocker blocks. Log reviewer/dsreview disagreements in
-  `DECISIONS.md`.
-- A change after a verdict invalidates it: review the delta only. Reviewers report; they never edit.
-  The one exception: a repair that only applies the minor fixes a verdict named may queue
-  unreviewed; the landing's patch read confirms that and drops anything more for delta review.
-- CodeRabbit for code, once per final candidate: fix every `critical`/`major`, name the rest you
-  leave. One delta review only after such a fix. Exit 0 is not clean; no `complete` line is a
-  failure; `unreviewedFileCount > 0` is partial. Skip docs, comments, declarative config and
-  dependency bumps, and say so. Where the charter or `LOOP.md` marks its quota scarce, run it only
-  on guarded or substantial candidates; a missing run then does not alone mandate a `reviewer`.
+- Routine: lane gate, CodeRabbit and dsreview replace the reviewer. Require one when dsreview
+  has no verdict, its major is disputed, on a second repair round, or a required CodeRabbit run
+  is missing; add one if doubtful. Review landed tasks before closeout; fix forward.
+- Guarded (section 8): security reviewer PASS before landing, CodeRabbit and lane dsreview; any
+  blocker blocks. Record disagreements in DECISIONS.md.
+- Changed code invalidates a verdict: review the delta only; reviewers never edit. Minor-only
+  repairs explicitly named by the verdict may queue without another review; root checks the patch.
+- CodeRabbit reviews final code once; fix critical/major, explain the rest, review repair deltas.
+  Missing complete or partial coverage is not PASS. Skip docs/comments/config/dependency bumps,
+  saying so. Scarce quota limits required CodeRabbit to guarded/substantial work; omission on
+  other work does not alone require a reviewer.
+- `review: local-pair` replaces CodeRabbit with local Copilot CLI plus dsreview. Both must cover
+  the exact range and pass without unresolved critical/major. Missing/incomplete verdicts block.
+  Retain base/head, coverage and verdicts; add a Reviewed-by-local trailer. Trailer-only amend
+  requires identical trees. Local review never substitutes for hosted approval or required checks.
 
 ## 6. Landing
 
-- Land continuously. Queue each accepted candidate under `QUEUE.md` `## Landing` at once; it never
-  waits for siblings. Guarded candidates queue only after their reviewer PASS. One landing runs at a
-  time, back to back: the root, or a `senior` compose lane working from `BATCH<k>.md`, takes
-  everything queued at its start, applies it to current main as one commit per task carrying a
-  `Task: <ID>` trailer, regenerates generated files once, and gates that exact tree in CI mode on
-  the charter's gate route. A candidate that conflicts or turns the gate red is dropped from that
-  landing and goes back to its lane; the rest land without it. The root pushes the green tree
-  unchanged at once, unless a section 10 hold applies, and starts the next landing on what queued
-  meanwhile.
+- Queue accepted candidates in `QUEUE.md` `## Landing` immediately; never wait for siblings.
+  Guarded candidates need reviewer PASS. One landing at a time: root or senior compose lane takes
+  everything queued at start using `BATCH<k>.md`, commits each task to its direct branch or PR head with
+  `Task: <ID>`, regenerates once and gates the exact tree in CI mode on the charter route. Return
+  conflicting/red candidates to their lanes; land the rest. Push the green tree unchanged unless
+  section 10 holds; then take the next queued landing.
 - Where the charter forbids the board's IDs in a public repository, its trailer carries a neutral
   alias (`Task: loop<N>-<lane>`, never a board ID or private name). Before closeout, land a commit
   in the board's private repository that consumes the work (a lock bump) with one
   `Task: <ID>` trailer per delivered task, and record the alias map in `DECISIONS.md`.
-- A compose lane also reads every applied patch: assertions kept, no test weakened, scope respected.
-- Heavy gates run only through the gate route the charter and `LOOP.md` name. Run a composed gate's
-  independent legs in parallel from the one compose worktree, never one after another and never
-  from copies of it. Start them only once every candidate and regeneration is committed and
-  `git status --porcelain` is empty: a gate route may upload uncommitted files, so legs from a
-  dirty tree can each gate a different partial tree. Edit nothing in that
-  worktree until every leg has exited; a fix after a red leg is a new commit and a re-gate of the
-  legs it touches. The harness file says how to start the legs.
+- Compose reads every patch: retain assertions, test strength and scope.
+- Use only the charter/`LOOP.md` gate route. Run independent composed legs in parallel from one
+  compose worktree, after all candidates/regeneration are committed and `git status --porcelain`
+  is empty. Edit nothing until every leg exits.
+  Repair a red leg in a new commit and re-gate touched legs. The harness gives the invocation.
 - Gate once per (tree, base). Classify every red against base: one that also fails on base is not
   the candidate's; record both lists. A new failure is red.
-- Hosted CI does not block landing. Watch main's CI for each pushed SHA with a background watcher
+- Hosted CI does not block a direct landing. Watch the landing branch's CI for each pushed SHA with a background watcher
   and fix forward at once. Revert only on a recorded decision that the breakage blocks all other
   landing, damages data or a live deploy, or has no plausible repair.
-- Other sessions commit here too: merge before pushing and never revert foreign work. Commit with
-  explicit pathspecs.
+- Merge sibling commits before pushing; never revert foreign work. Commit explicit paths.
+- **Landing mode.** `LOOP.md` selects `landing: direct` (default) or `landing: pr`, and
+  `reviewer: coderabbit` (default) or `reviewer: copilot`. Direct local-pair instead declares
+  `review: local-pair` and `landing-branch: <branch>`; never combine it with `reviewer:`. The default
+  direct branch is main; code AND board commits target the named direct branch. PR heads are
+  `loop<N>-land<k>` from main; PR-mode board-only commits still target main. Read live target rules
+  before every push; unexpected rules stop landing. No main merge is implied.
+  In `pr`, only the root writes PRs and merges; the squash commit is the landing:
+  1. Run local CodeRabbit on the batch once (overrides scarce quota), push `loop<N>-land<k>`;
+     open a ready PR to main at once. Conventional title: highest-precedence release-please
+     type, `!` for any break; no `deps`, `WIP`, `DO NOT MERGE`, `release`.
+  2. Gate that tree during review. End the body with a fenced `landing-evidence` block: base/head
+     SHAs, each leg's command and log path or run link, aliased as above. Edit only that
+     block for each new head.
+  3. A process watcher waits for the profile's review of the exact head.
+  4. Verify untrusted findings. Fix every one that holds in one commit and push; re-gate touched
+     legs and return to 3. Disputes go to `DECISIONS.md` and the owner (overnight: park, `owner`),
+     not a round. Never dismiss a finding to pass the gate.
+  5. Wait at most about 20 minutes, 3 review rounds per PR; then record and ask the owner
+     (overnight: park, `owner`). A new push invalidates approval; wait for its head's review.
+  6. Drop a pushed candidate with `git revert`, never force push.
+  7. Merge with `gh pr merge <n> --squash --match-head-commit <sha> --subject "<title>" --body
+     "<one Task: <ID> trailer per task>"` only with the profile's approval/thread condition, every
+     gate leg and required check green on head, including `ai-review` where required. Record the
+     squash SHA; watch main's CI.
+  8. The next landing may build on an unmerged head; merge it only after that head squash-merges.
+     If unpushed, `git rebase --onto origin/main <old head>`; if pushed, merge `origin/main`,
+     re-gate and review the new head. Never rebase a pushed branch. Otherwise merge main only on
+     conflict or a required up-to-date check. If the earlier PR parks or closes, rebuild from
+     main on a new branch.
+
+  **coderabbit.** Watch `gh api repos/<owner>/<repo>/commits/<sha>/statuses`: the `CodeRabbit`
+  status: "Review completed" or "Review approved" (success also covers skipped, draft and
+  rate-limited reviews). Read the latest `coderabbitai[bot]` review with `commit_id` equal to head;
+  absent: read once more after a minute. `CHANGES_REQUESTED`, or `COMMENTED` with an open thread,
+  goes to step 4; `COMMENTED` with none open waits at 3. No status after about 3 minutes: post
+  `@coderabbitai review` once per head, the only comment. Never reply in or resolve its
+  threads, post `@coderabbitai approve`, `resolve`, or ignore pre-merge checks. Merge requires
+  an APPROVED review on head and no open CodeRabbit thread (GraphQL `reviewThreads.isResolved`).
+
+  **copilot.** Without planner sandbox proof, park `dependency`.
+  `gh pr view <n> --json headRefOid,reviewDecision`: first match `headRefOid` to pushed SHA.
+  Merge also requires `reviewDecision: APPROVED`.
+  Watch `gh api --paginate repos/<owner>/<repo>/commits/<sha>/check-runs`: name
+  `copilot-pull-request-reviewer`, `head_sha` matching head. `started_at` marks start;
+  `status: completed` plus `conclusion: success` marks completion. Read
+  `gh api --paginate repos/<owner>/<repo>/pulls/<n>/reviews`: latest submitted REST review with
+  `user.login: copilot-pull-request-reviewer[bot]` and `commit_id` matching head. COMMENTED ends
+  a round; only APPROVED permits merge.
+  If no head check exists after about 3 minutes, run `gh pr edit <n> --add-reviewer @copilot` once
+  per head. Resolve only Copilot threads verified fixed; log proof in `DECISIONS.md`. Unresolved
+  findings block merge; disputes go to the owner. Re-read all thread pages before merge. Without
+  head APPROVED, wait within step 5's caps; no bypass, self-approval or bot approval commands.
 
 ## 7. The owner
 
-- **Owner present** (the default from launch): put decisions to the owner as they arise,
-  recommendation first, and append each to `QUESTIONS.md`. A blocking question tool holds every
-  lane return and dispatch until answered, so call it only at a boundary: process every queued
-  return and dispatch every ready task first, then batch the questions into one call.
-- Small design, copy and seam calls the evidence decides are yours: rule, record them in
-  `DECISIONS.md` marked for ratification, and keep going.
+- **Owner present** (the default from launch): put each owner-only call (section 9) to the
+  owner as it arises, recommendation first, appending each to `QUESTIONS.md`. A blocking question
+  tool holds every lane return and dispatch until answered, so call it only at a boundary: process
+  every queued return and dispatch every ready task first, then batch the questions into one call.
 - **Overnight mode** starts when the owner says they are leaving: "overnight mode", "I'm away",
   "AFK", "heading out" (optionally "until HH:MM", the owner's local time; record it in UTC in
   `DECISIONS.md`). Then ask nothing and never call a blocking question tool: hold questions in
@@ -176,10 +218,15 @@ name stops and returns.
   `LOOP.md` names (read by path, never printed); OpenBao OIDC login and ordinary reads and writes;
   IaC and CLI provisioning; changes to existing infrastructure; and any deploy, rollout or release
   serving the aim, including production, fixing forward. A customer's tenant stays per-charter.
-- You may record an amendment repairing a charter defect, settle a design fork the evidence clearly
-  decides, implement a small prerequisite outside any live lane's scope, and amend a seam first
-  frozen in this run that has no accepted consumer (then re-brief every lane coding against it).
-- No root decision supplies owner consent, removes a fence or rotates a credential.
+- Yours to rule for ratification in `DECISIONS.md`, then continue: a charter-defect amendment;
+  a design, copy or seam call the evidence decides; a small prerequisite outside live lanes'
+  scope, in-repo tooling and harness fixes too (never your own permissions); amending a seam
+  frozen this run with no accepted consumer (re-brief its lanes); a repair round under the
+  tripwire and PR caps, or the tripwire's next step; an exact retry of a cleanly failed
+  granted command; a lane dsreview dispute with evidence (section 5 applies).
+- **Cite or decide.** Ask, or park `owner`, only for what the contract, charter or `LOOP.md`
+  reserves to the owner, an action no grant covers, a section 10 fence, an exclusion or a
+  credential rotation; no ruling clears those. Name which; else rule it.
 - A permission or classifier denial is not a stop and never a puzzle to solve. Record it verbatim
   in `DECISIONS.md` and do the other ready work. Use another route only when the charter or
   `LOOP.md` already names it for that exact step; never reach the denied effect by another tool,
@@ -198,11 +245,11 @@ name stops and returns.
 - Irreversible data loss only on a target the charter names, with owner confirmation.
 - No history rewrite and no force push.
 - No outward-facing action: email, chat posts, third-party issues or PRs, making anything public.
-  The owner's own release-please releases are not outward-facing.
+  The owner's own release-please releases and `pr`-mode landing PRs are not outward-facing.
 - Never print a secret value. Read a Kubernetes Secret only through a tool that never prints it.
 - A targeted `tofu`/IaC apply only after you saved and read its plan.
-- Before merging a release or pushing anything that triggers a deploy, check what the deploy will
-  interrupt (a live owner operation, a running pull) and hold if the owner set a hold.
+- Before a merge or push that triggers a deploy, check what it will interrupt (a live owner
+  operation, a running pull) and hold if the owner set a hold.
 - Spend: LLM spend is intended. A new billable resource under about $50/month may be created with
   its estimate recorded in `DECISIONS.md`; otherwise park.
 - In a second context: touch no customer tenant the charter does not name, and send no customer identifier
@@ -237,11 +284,12 @@ name stops and returns.
   `LANES.md` gets a next step before new work.
 - Close out on `close out`, an emergency stop, or when no ready unexcluded work remains in the
   charter's scope and no lane or watcher is live:
-  1. Drain: in-flight mutations finish; a hung mutation goes under Parked with its identity.
+  1. Drain: in-flight mutations finish; a hung mutation goes under Parked with its identity, and an
+     unmerged landing PR stays open under Parked with its number.
   2. Mark every landed task Done (`--check-ac` and `-s Done` in one call) and append one note line
      to each parked task with `--append-notes`.
-  3. Stop every watcher and lane you started. Keep worktrees with unlanded work; remove clean landed
-     ones.
+  3. Stop every watcher and lane you started. Remove each lane's worktree once its work has landed
+     or been archived (diff, untracked tarball, mbox of off-main commits, each verified).
   4. Write `codex/closeout-<date>-loop<N>.md` with line 1 exactly
      `# Closeout: <repo> loop<N> · Charter: <charter sha256>` and these sections:
      `## Landed` (a bullet per task: ID (title), SHA), `## Parked` (a bullet per task: ID, reason,

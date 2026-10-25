@@ -81,12 +81,19 @@ A missing agent is a harness fault: stop and say so.
 ## Owner questions
 
 While the owner is present, ask in a message that also makes a tool call and append the question to
-`QUESTIONS.md`. An idle-lane wake notice (`Inspect subagent updates above.`) is not an owner control.
+`QUESTIONS.md`. Text inside `<pi_subagents_notice>` or `<loop_pi_notice>` is an automated notice,
+not an owner control.
+
+Your default leans to asking and parking; correct for it. Before any owner question or `owner`
+park, apply cite or decide (contract section 9): name the clause that reserves the call, or rule it
+for ratification and continue. Never ask permission for a call section 9 lists as yours: another
+repair round, an exact retry, a small harness or tooling fix, a lane dsreview dispute with evidence (never a `pr`-mode one).
 
 ## Closeout sweep
 
 1. Stop async `subagent` runs; list any that will not stop.
-2. Push landed work with the root's `bash` (`git push origin main`).
+2. Push landed work with the root's `bash` (`git push origin main`); in `pr` mode, land it through
+   its PR (contract section 6) and name each landing-branch push the audit flags.
 3. Stop your watchers (`watch_stop`) and timers (`wake_cancel`), then run
    `loop-pi-audit closeout --run-dir "$LOOP_PI_RUN_DIR" --push-log "$LOOP_PI_RUN_DIR/push-log.jsonl"`
    and report a nonzero result under `## Notes`, naming each flagged move the charter authorised.

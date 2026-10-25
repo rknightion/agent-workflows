@@ -48,6 +48,14 @@ Read these each time and never restate them here:
    file of per-repository grants, use its absolute path, and take a new or changed entry to the
    owner first. Hash the file with `shasum -a 256` and put the path and hash in the charter and
    the launch file.
+   **Landing mode.** Apply the planner's landing checks before writing files: `LOOP.md` selects
+   `reviewer: coderabbit` (default) or `reviewer: copilot`. Direct local-pair instead declares
+   `review: local-pair` and `landing-branch: <branch>`, with no `reviewer:`; follow the canonical
+   planner's exact-repo authority, branch-rule and local-review proof requirements.
+   Run `loop-lint loopmd <abs LOOP.md>`;
+   for PR landings, carry the selected profile's required authority and checks into the charter and,
+   where required, the launch. Copilot activation needs observed sandbox lifecycle evidence;
+   settings alone do not satisfy the planner's check.
 7. **Write the files**, `<date>` being the UTC preparation date:
    - `codex/charter-<date>-loop<N>.md` from `charter.md`, under 8 KB;
    - `codex/loop<N>/LANE.md` from `lane.md` with its `<...>` slots filled, then `LOOP.md`'s

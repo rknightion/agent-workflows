@@ -74,6 +74,8 @@ The launch file's first line is the command; the message follows it:
 - Your own waits (main CI, a release, a gate you run) are one `run_in_background` Bash command
   whose `until` loop exits on every terminal state; its completion wakes you. Streamed events use
   `Monitor`, re-armed when it expires.
+- In `pr` mode, each PR's selected-profile wait (contract section 6) is one background until-loop
+  using that profile's exact-head reads; exit on done, the 3-minute no-start mark or the 20-minute cap.
 - `LOOP.md`'s optional `ci-status` command replaces `gh` reads: substitute the full SHA for `{sha}`,
   sleep 60 s between reads, stop on `success` or `failure`, bound the loop by `ci-max-minutes`
   (default 30).

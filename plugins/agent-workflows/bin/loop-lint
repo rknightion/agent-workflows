@@ -35,6 +35,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from urllib.parse import quote
 
 CHARTER_MAX = 8192
 FIRST_WAVE_ROWS = 20
@@ -201,38 +202,40 @@ def ci_required_names(value):
     return {c.strip() for c in next(csv.reader([value], skipinitialspace=True), []) if c.strip()}
 
 
-def required_checks(repo):
-    """Required status check names on main: every active ruleset that applies to main plus classic
+def required_checks(repo, branch="main"):
+    """Required status checks for the landing branch: active rulesets plus classic
     branch protection. The rulesets endpoint answers 200 for any repository gh can see, so anything
     else is an error; the only 404 read as empty is classic protection's `Branch not protected`."""
     slug = origin_slug(repo)
+    ref = quote(branch, safe="")
     names = set()
-    status, data, message = gh_api_status(f'repos/{slug}/rules/branches/main?per_page=100')
+    status, data, message = gh_api_status(f'repos/{slug}/rules/branches/{ref}?per_page=100')
     if status != 200 or not isinstance(data, list):
-        raise GhError(f'rulesets for {slug} main: HTTP {status} {message}'.rstrip()
+        raise GhError(f'rulesets for {slug} {branch}: HTTP {status} {message}'.rstrip()
                       + ' (gh cannot see the repository or branch)')
     for rule in data:
         if isinstance(rule, dict) and rule.get('type') == 'required_status_checks':
             checks = (rule.get('parameters') or {}).get('required_status_checks') or []
             names.update(c.get('context') for c in checks if c.get('context'))
-    status, data, message = gh_api_status(f'repos/{slug}/branches/main/protection/required_status_checks')
+    status, data, message = gh_api_status(f'repos/{slug}/branches/{ref}/protection/required_status_checks')
     if status == 200 and isinstance(data, dict):
         names.update(data.get('contexts') or [])
         names.update(c.get('context') for c in data.get('checks') or [] if c.get('context'))
     elif not (status == 404 and message == 'Branch not protected'):
-        raise GhError(f'branch protection for {slug} main: HTTP {status} {message}'.rstrip())
+        raise GhError(f'branch protection for {slug} {branch}: HTTP {status} {message}'.rstrip())
     return names
 
 
-def main_required_state(repo, required):
-    """('red'|'green'|'undecided', detail) for the latest run of each required check on main's head,
+def main_required_state(repo, required, branch="main"):
+    """('red'|'green'|'undecided', detail) for the latest run of each required check on the landing head,
     read from the check runs and the legacy commit statuses; a name red in either is red. Only `success` is green; pending, missing, skipped or neutral decide
     nothing. GhError when the check runs cannot be read."""
     slug = origin_slug(repo)
-    result = run(['gh', 'api', '--paginate', f'repos/{slug}/commits/main/check-runs?per_page=100',
+    ref = quote(branch, safe='')
+    result = run(['gh', 'api', '--paginate', f'repos/{slug}/commits/{ref}/check-runs?per_page=100',
                   '--jq', '.check_runs[] | {id, name, status, conclusion}'], cwd=str(repo))
     if result.returncode != 0:
-        raise GhError(f'check runs on main: {(result.stderr or result.stdout).strip()[:200]}')
+        raise GhError(f'check runs on {branch}: {(result.stderr or result.stdout).strip()[:200]}')
     latest = {}
     for line in result.stdout.splitlines():
         if not line.strip():
@@ -245,9 +248,9 @@ def main_required_state(repo, required):
         if name in required and (name not in latest or (item.get('id') or 0) > (latest[name].get('id') or 0)):
             latest[name] = item
     # Legacy commit statuses: a required name may report only here, or here as well as a check run.
-    result = run(['gh', 'api', f'repos/{slug}/commits/main/status?per_page=100'], cwd=str(repo))
+    result = run(['gh', 'api', f'repos/{slug}/commits/{ref}/status?per_page=100'], cwd=str(repo))
     if result.returncode != 0:
-        raise GhError(f'commit statuses on main: {(result.stderr or result.stdout).strip()[:200]}')
+        raise GhError(f'commit statuses on {branch}: {(result.stderr or result.stdout).strip()[:200]}')
     try:
         statuses = json.loads(result.stdout or '{}').get('statuses') or []
     except (ValueError, AttributeError):
@@ -348,6 +351,23 @@ def lint_loopmd(path, offline, repo_arg=None):
     need('tier', lambda v: v in ('routine', 'guarded'), 'routine | guarded')
     need('gate', lambda v: bool(v) and v.lower() != 'none', 'the local gate command')
     need('ci-required', lambda v: bool(v), 'required check names, or none')
+    if 'reviewer' in keys:
+        need('reviewer', lambda v: v in ('coderabbit', 'copilot'), 'coderabbit | copilot')
+    if 'landing' in keys:
+        need('landing', lambda v: v in ('direct', 'pr'), 'direct | pr')
+    if 'landing-branch' in keys:
+        if keys.get('landing') == 'pr':
+            report.error('L2', where['landing-branch'], 'landing-branch applies only to direct landing; PR targets main')
+        need('landing-branch', lambda v: bool(v) and not v.startswith('-') and '@{' not in v
+             and v != 'HEAD' and run(['git', 'check-ref-format', '--branch', v]).returncode == 0,
+             'a valid named landing branch')
+    if 'review' in keys:
+        need('review', lambda v: v == 'local-pair', 'local-pair')
+        if keys.get('review') == 'local-pair':
+            if keys.get('landing', 'direct') != 'direct' or not keys.get('landing-branch'):
+                report.error('L2', where['review'], 'local-pair requires direct landing and landing-branch')
+            if 'reviewer' in keys:
+                report.error('L2', where['review'], 'local-pair cannot also select a hosted reviewer')
     # Kept for LOOP.md files that still carry them; only the pre-green eligibility rule needed them.
     for key in ('release-on-push', 'deploy-on-push'):
         if key in keys and keys[key] not in ('yes', 'no'):
@@ -379,7 +399,8 @@ def lint_loopmd(path, offline, repo_arg=None):
         else:
             declared = ci_required_names(keys['ci-required'])
             try:
-                actual = required_checks(Path(repo_arg) if repo_arg else Path(path).resolve().parent)
+                actual = required_checks(Path(repo_arg) if repo_arg else Path(path).resolve().parent,
+                                         keys.get("landing-branch", "main"))
             except NotOnGitHub:
                 report.info('L2', where['ci-required'], 'required checks not verifiable (not on GitHub)')
             except GhError as error:
@@ -390,7 +411,8 @@ def lint_loopmd(path, offline, repo_arg=None):
                                  f'ci-required {sorted(declared)} differs from required checks '
                                  f'{sorted(actual)}')
                 check_main_ci(report, Path(repo_arg) if repo_arg else Path(path).resolve().parent,
-                              actual, where.get('baseline-red', where['ci-required']), 'baseline-red' in keys)
+                              actual, where.get('baseline-red', where['ci-required']), 'baseline-red' in keys,
+                              keys.get('landing-branch', 'main'))
 
     for number, line, _ in numbered(text):
         for match in re.finditer(r'\b\d{4}-\d\d-\d\d\b', line):
@@ -404,23 +426,23 @@ def lint_loopmd(path, offline, repo_arg=None):
     return report
 
 
-def check_main_ci(report, repo, required, line, baseline_red):
-    """Warn when `baseline-red` looks stale or is missing, from the required checks on main's head."""
+def check_main_ci(report, repo, required, line, baseline_red, branch="main"):
+    """Warn when `baseline-red` looks stale or is missing, from required checks on the landing head."""
     if not required:
-        report.info('L2', line, 'no required checks, so main\'s CI was not read')
+        report.info('L2', line, f'no required checks, so {branch} CI was not read')
         return
     try:
-        state, detail = main_required_state(repo, required)
+        state, detail = main_required_state(repo, required, branch)
     except GhError as error:
-        report.info('L2', line, f'CI on main unreadable: {error}')
+        report.info('L2', line, f'CI on {branch} unreadable: {error}')
         return
     if state == 'green' and baseline_red:
-        report.warn('L2', line, 'baseline-red may be stale: every required check on main\'s head is green')
+        report.warn('L2', line, f'baseline-red may be stale: every required check on {branch} head is green')
     elif state == 'red' and not baseline_red:
-        report.warn('L2', line, f'main is red ({detail}): add baseline-red with an owning task, '
-                                'or fix main first')
+        report.warn('L2', line, f'{branch} is red ({detail}): add baseline-red with an owning task, '
+                                f'or fix {branch} first')
     else:
-        report.info('L2', line, f'CI on main: {state} ({detail})')
+        report.info('L2', line, f'CI on {branch}: {state} ({detail})')
 
 
 # --- charter (C) -----------------------------------------------------------------------------

@@ -31,6 +31,13 @@ lane, and never touch credentials or live systems.
   (tree, base); a red that also fails on base is not yours: list both. A repaired tree is a new
   tree: rerun the gate before returning `complete`. Running the gate route is never a live-system
   touch, even when it reaches a build host.
+- For `review: local-pair`, the root composes committed ranges and runs the repository's
+  exact-repo-checked review recipe with the provider/key route in its repository instructions.
+  Lanes keep the candidate-return rules above, not the generic review wrappers below. Copilot
+  CLI and dsreview must both cover the final candidate range with no unresolved critical/major;
+  missing/incomplete verdicts block. The root records verdicts and the Reviewed-by-local trailer.
+  Do not substitute a key or allow the whole repository owner. This replaces CodeRabbit and the
+  generic dsreview invocation below; all gate and security-review obligations remain.
 - CodeRabbit: `coderabbit review --agent --base-commit <base>` once on your final candidate, with
   `--include-untracked` so new files are reviewed. Fix every `critical`/`major`. After such a fix only, one delta review with
   `--base-commit <last reviewed SHA>`. Skip it for docs, comments, declarative config and dependency

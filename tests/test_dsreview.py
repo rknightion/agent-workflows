@@ -207,6 +207,29 @@ class Review(Case):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(len(gateway.requests), 2)
         self.assertIsNone(json.loads(result.stdout)['verdict'])
+        self.assertNotIn('tools', gateway.requests[1]['body'])
+
+    def test_markup_at_turn_limit_gets_one_tools_disabled_recovery(self):
+        repo = make_repo(self.tmp)
+        first, _ = scripted_tools(('read_file', {'path': 'calc.py'}))
+        markup = sse({'choices': [{'delta': {'content':
+            '<｜DSML｜function_calls><｜DSML｜invoke name="read_file">'
+            '<｜DSML｜parameter name="path">calc.py</｜DSML｜parameter>'
+            '</｜DSML｜invoke></｜DSML｜function_calls>'}}]})
+        for final, exit_code in ((passing(), 0), (markup, 2), (first, 2)):
+            with self.subTest(exit_code=exit_code), Gateway([first] * 49 + [markup, final]) as gateway:
+                result = run(self.tmp, gateway.url, '--repo', str(repo), '--max-turns', '50')
+            self.assertEqual(result.returncode, exit_code, result.stdout + result.stderr)
+            self.assertEqual(len(gateway.requests), 51)
+            out = json.loads(result.stdout)
+            self.assertEqual((out['turns'], out['tool_calls']), (51, 49))
+            for request in gateway.requests[-2:]:
+                self.assertNotIn('tools', request['body'])
+            recovery = gateway.requests[-1]['body']['messages'][-1]['content']
+            self.assertIn('only the json object', recovery)
+            if exit_code == 2:
+                self.assertIsNone(out['verdict'])
+                self.assertIn('no_parseable_verdict', out['error'])
 
     def test_worktree_tools_never_see_git_metadata_or_ignored_files(self):
         repo = make_repo(self.tmp)
@@ -408,6 +431,95 @@ class Configuration(Case):
             result = run(self.tmp, gateway.url, '--repo', str(repo), DSREVIEW_MODEL='deepseek-other')
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(gateway.requests[0]['body']['model'], 'deepseek-other')
+
+
+def openrouter_tool_then_final():
+    """OpenRouter's stream shape: reasoning in `reasoning`, the routed host in the final chunk's
+    openrouter_metadata, cached tokens in prompt_tokens_details and the billed amount in usage.cost."""
+    routing = {'openrouter_metadata': {'endpoints': {'total': 2, 'available': [
+        {'provider': 'OtherHost', 'selected': False}, {'provider': 'ExampleHost', 'selected': True}]}}}
+    usage = {'prompt_tokens': 100, 'prompt_tokens_details': {'cached_tokens': 60}, 'completion_tokens': 50,
+             'completion_tokens_details': {'reasoning_tokens': 40}, 'cost': 0.0012}
+    first = sse(
+        {'model': 'deepseek/deepseek-v4.1-flash', 'choices': [{'delta': {'reasoning': 'check callers'}}]},
+        {'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': 'c1', 'type': 'function',
+                                                'function': {'name': 'read_file', 'arguments': '{"path": "new_mod.py"}'}}]},
+                      'finish_reason': 'tool_calls'}]},
+        {'choices': [], 'usage': usage, **routing})
+    second = sse(
+        {'model': 'deepseek/deepseek-v4.1-flash', 'choices': [{'delta': {'reasoning': 'done'}}]},
+        {'choices': [{'delta': {'content': json.dumps(FINAL)}, 'finish_reason': 'stop'}]},
+        {'choices': [], 'usage': usage, **routing})
+    return [first, second]
+
+
+class OpenRouter(Case):
+    """DSREVIEW_PROVIDER=openrouter: same review, OpenRouter's auth, request and stream shapes."""
+
+    def test_review_uses_openrouter_auth_reasoning_and_routing(self):
+        repo = make_repo(self.tmp)
+        with Gateway(openrouter_tool_then_final()) as gateway:
+            result = run(self.tmp, gateway.url, '--repo', str(repo), '--effort', 'max', DSREVIEW_PROVIDER='openrouter')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        out = json.loads(result.stdout)
+        self.assertEqual(out['verdict'], 'FAIL')
+        self.assertEqual((out['provider'], out['host'], out['model']), ('openrouter', 'ExampleHost', 'deepseek/deepseek-v4.1-flash'))
+        self.assertEqual(out['usage']['cache_hit'], 120)
+        self.assertEqual(out['usage']['cache_miss'], 80)
+        self.assertEqual(out['usage']['reasoning'], 80)
+        self.assertEqual(out['cost_usd'], 0.0024)
+        first = gateway.requests[0]
+        self.assertEqual(first['headers']['authorization'], 'Bearer test-token')
+        self.assertEqual(first['headers']['x-openrouter-metadata'], 'enabled')
+        self.assertFalse([h for h in first['headers'] if h.startswith('cf-aig-')])
+        body = first['body']
+        self.assertEqual(body['model'], '~deepseek/deepseek-flash-latest')
+        self.assertEqual(body['reasoning'], {'effort': 'max'})
+        self.assertNotIn('reasoning_effort', body)
+        self.assertEqual((body['provider']['data_collection'], body['provider']['zdr']), ('deny', True))
+        self.assertTrue(body['provider']['require_parameters'])
+        self.assertNotIn('fp4', body['provider']['quantizations'])
+        # The reasoning travels back with the tool call, and the tool result is the candidate file.
+        assistant = gateway.requests[1]['body']['messages'][2]
+        self.assertEqual(assistant['reasoning_content'], 'check callers')
+        self.assertIn('LIMIT = 3', tool_results(gateway.requests[1])[0])
+
+    def test_routing_override_and_cloudflare_cost_is_null(self):
+        repo = make_repo(self.tmp)
+        with Gateway([passing()]) as gateway:
+            result = run(self.tmp, gateway.url, '--repo', str(repo), DSREVIEW_PROVIDER='openrouter',
+                         DSREVIEW_OPENROUTER_PROVIDER='{"only": ["deepseek"]}')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(gateway.requests[0]['body']['provider'], {'only': ['deepseek']})
+        with Gateway([passing()]) as gateway:
+            result = run(self.tmp, gateway.url, '--repo', str(repo))
+        out = json.loads(result.stdout)
+        self.assertEqual((out['provider'], out['cost_usd']), ('cloudflare', None))
+        self.assertNotIn('provider', gateway.requests[0]['body'])
+
+    def test_error_event_after_200_is_retried_not_trusted(self):
+        repo = make_repo(self.tmp)
+        failed = sse({'error': {'code': 502, 'message': 'upstream died'}, 'choices': [{'delta': {}, 'finish_reason': 'error'}]})
+        with Gateway([failed, passing()]) as gateway:
+            result = run(self.tmp, gateway.url, '--repo', str(repo), DSREVIEW_PROVIDER='openrouter')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(gateway.requests), 2)
+        # A retry of the same turn, not an empty reply answered with a nudge.
+        self.assertEqual(gateway.requests[1]['body']['messages'], gateway.requests[0]['body']['messages'])
+
+    def test_default_url_and_bad_configuration(self):
+        module = load()
+        self.assertEqual(module.gateway_url({'DSREVIEW_PROVIDER': 'openrouter'}), 'https://openrouter.ai/api/v1/chat/completions')
+        self.assertEqual(module.gateway_url({'DSREVIEW_PROVIDER': 'OpenRouter', 'DSREVIEW_URL': 'http://x/c'}), 'http://x/c')
+        repo = make_repo(self.tmp)
+        with Gateway([]) as gateway:
+            for env, needle in (({'DSREVIEW_PROVIDER': 'bedrock'}, 'DSREVIEW_PROVIDER'),
+                                ({'DSREVIEW_PROVIDER': 'openrouter', 'DSREVIEW_OPENROUTER_PROVIDER': '[1]'}, 'JSON object'),
+                                ({'DSREVIEW_PROVIDER': 'openrouter', 'DSREVIEW_OPENROUTER_PROVIDER': '{'}, 'not JSON')):
+                result = run(self.tmp, gateway.url, '--repo', str(repo), **env)
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn(needle, json.loads(result.stdout)['error'])
+            self.assertEqual(gateway.requests, [])
 
 
 if __name__ == '__main__':

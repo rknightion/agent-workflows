@@ -23,6 +23,21 @@ Read by the `loop` skill only. Preparing a run should take minutes, not an hour.
    `AGENTS.md` names a remote gate runner (a committed runner contract), the route is that runner and
    its slot pacer, and a workstation run under a mutex is only the fallback for the runner failures
    `AGENTS.md` lists; write both into `gate-route`. Re-route an older `LOOP.md` gate row to match.
+   **Landing mode.** Read `landing:` from `LOOP.md` (absent means `direct`) and `reviewer:`
+   (`coderabbit` by default; only `coderabbit` or `copilot`). Direct local-pair instead uses
+   `review: local-pair` plus `landing-branch: <branch>` with no `reviewer:`. Record the exact repo,
+   branch, live rules and local Copilot CLI/dsreview command/key availability; never waive required
+   hosted approval or infer main/deploy authority. Run `loop-lint loopmd <abs LOOP.md>`.
+   For `pr`, the charter's `authority:` grants pushing landing branches, opening PRs and
+   `gh pr merge --squash --match-head-commit`, and names the profile, merge gate and required checks
+   (including `ai-review` where required; it is an ordinary check). On `claude`, copy those grants
+   into the launch too. For `coderabbit`, also grant one `@coderabbitai review` per stalled head;
+   check `.coderabbit.yaml` sets `reviews.request_changes_workflow: true`, otherwise make that the
+   first task. For `copilot`, record observed sandbox evidence: approval counts under the actual
+   rule without bypass, a new push dismisses it and triggers review, exact start/completion API
+   reads and bot login; grant the evidenced review-request and thread-resolution actions. Settings
+   alone prove none of these. Missing evidence parks activation; never invent a check/status name
+   or copy CodeRabbit's thread prohibition. Keep section 5's local review obligations.
 6. **Write the files** (contract section 1): the charter from
    `<plugin root>/protocol/loop/charter.md`, `codex/loop<N>/LANE.md` from
    `<plugin root>/protocol/loop/lane.md` plus `LOOP.md`'s `## Lane brief`, and the launch file

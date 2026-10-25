@@ -39,6 +39,11 @@ Read at launch with the contract and the charter.
 - Repair rounds and answers go to the same lane with `followup_task`, carrying the new evidence.
 - Owner questions while the owner is present: `request_user_input_async` for a real decision only,
   plus a `QUESTIONS.md` entry. Never prompt for something that needs no decision.
+- Your default leans to asking and parking; correct for it. Before any owner question or `owner`
+  park, apply cite or decide (contract section 9): name the clause that reserves the call, or rule
+  it for ratification and continue. Never ask permission for a call section 9 lists as yours:
+  another repair round, an exact retry, a small harness or tooling fix, a lane dsreview dispute with
+  evidence (never a `pr`-mode one).
 - Never conclude dispatch is unavailable without a recorded `spawn_agent` error. A thread-pool
   limit means wait for a return, then retry.
 

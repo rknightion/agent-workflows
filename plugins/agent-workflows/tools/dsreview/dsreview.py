@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""dsreview: code review by DeepSeek Flash (Cloudflare AI Gateway) with read-only repo tools.
+"""dsreview: code review by DeepSeek Flash (Cloudflare AI Gateway or OpenRouter) with read-only repo tools.
 
 Reviews one candidate change against its brief and prints a JSON verdict:
   dsreview --brief brief.md                       # uncommitted worktree in cwd vs HEAD
@@ -8,14 +8,17 @@ Reviews one candidate change against its brief and prints a JSON verdict:
 Exit status: 0 PASS, 1 FAIL, 2 no verdict or error.
 
 Configuration (environment):
-  DSREVIEW_URL              full chat completions URL; overrides the two below
+  DSREVIEW_PROVIDER         cloudflare (default) or openrouter
+  DSREVIEW_URL              full chat completions URL; overrides the defaults below
   DSREVIEW_CF_ACCOUNT_ID    Cloudflare account id   } gateway.ai.cloudflare.com/v1/<account>/<gateway>/
   DSREVIEW_CF_GATEWAY       AI Gateway name         } deepseek/chat/completions
-  DSREVIEW_TOKEN            AI Gateway token (cf-aig-authorization), or
+                            (openrouter: https://openrouter.ai/api/v1/chat/completions)
+  DSREVIEW_TOKEN            AI Gateway token (cf-aig-authorization) or OpenRouter API key, or
   DSREVIEW_TOKEN_FILE       a file holding it
   DSREVIEW_ALLOWED_OWNERS   comma list of repository owners (or host/owner) whose code may be
                             sent to DeepSeek; unset refuses every repository
-  DSREVIEW_MODEL            model name (default deepseek-flash)
+  DSREVIEW_MODEL            model name (default deepseek-flash; openrouter ~deepseek/deepseek-flash-latest)
+  DSREVIEW_OPENROUTER_PROVIDER  openrouter only: JSON provider routing object replacing the default
 """
 import argparse
 import io
@@ -33,7 +36,12 @@ import urllib.error
 import urllib.request
 
 CF_GATEWAY = 'https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway}/deepseek/chat/completions'
-DEFAULT_MODEL = 'deepseek-flash'
+OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
+DEFAULT_MODEL = {'cloudflare': 'deepseek-flash', 'openrouter': '~deepseek/deepseek-flash-latest'}
+# OpenRouter hosts: only those that honour every parameter sent (tools, reasoning), keep no copy of
+# the code (zero data retention) and never train on it, and serve the model at fp8 or better.
+OPENROUTER_ROUTING = {'require_parameters': True, 'data_collection': 'deny', 'zdr': True,
+                      'quantizations': ['fp8', 'fp16', 'bf16', 'fp32', 'unknown']}
 MAX_DIFF_CHARS = 1_500_000
 TOOL_RESULT_CHARS = 40_000
 # USD per million tokens, peak rates (off-peak is half); used for the cost estimate only.
@@ -66,11 +74,33 @@ def git(repo, *args, binary=False, ok=(0,)):
     return r.stdout if binary else r.stdout.decode('utf-8', 'replace')
 
 
+def provider(environ):
+    name = (environ.get('DSREVIEW_PROVIDER') or 'cloudflare').strip().lower()
+    if name not in DEFAULT_MODEL:
+        raise ReviewError(f'unknown DSREVIEW_PROVIDER {name!r}: use cloudflare or openrouter')
+    return name
+
+
+def openrouter_routing(environ):
+    raw = (environ.get('DSREVIEW_OPENROUTER_PROVIDER') or '').strip()
+    if not raw:
+        return OPENROUTER_ROUTING
+    try:
+        routing = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ReviewError(f'DSREVIEW_OPENROUTER_PROVIDER is not JSON: {e}')
+    if not isinstance(routing, dict):
+        raise ReviewError('DSREVIEW_OPENROUTER_PROVIDER must be a JSON object')
+    return routing
+
+
 def gateway_url(environ):
-    """The chat completions URL: DSREVIEW_URL, else the stock AI Gateway URL for the account and gateway."""
+    """The chat completions URL: DSREVIEW_URL, else OpenRouter's or the stock AI Gateway URL."""
     url = (environ.get('DSREVIEW_URL') or '').strip()
     if url:
         return url
+    if provider(environ) == 'openrouter':
+        return OPENROUTER_URL
     account, gateway = (environ.get('DSREVIEW_CF_ACCOUNT_ID') or '').strip(), (environ.get('DSREVIEW_CF_GATEWAY') or '').strip()
     if account and gateway:
         return CF_GATEWAY.format(account_id=account, gateway=gateway)
@@ -184,12 +214,30 @@ def candidate(args, scratch):
     return scratch, diff
 
 
-def stream_chat(url, token, body, timeout):
+def request_headers(name, token):
+    headers = {'content-type': 'application/json', 'user-agent': 'dsreview/1'}
+    if name == 'openrouter':
+        # Router metadata names the host that served the request, on the stream's final chunk.
+        headers.update({'authorization': 'Bearer ' + token, 'x-title': 'dsreview', 'x-openrouter-metadata': 'enabled'})
+    else:
+        headers.update({'cf-aig-authorization': 'Bearer ' + token, 'cf-aig-skip-cache': 'true',
+                        'cf-aig-metadata': json.dumps({'app': 'dsreview'})})
+    return headers
+
+
+def served_by(event):
+    """The OpenRouter host named by a stream event's router metadata, if it carries any."""
+    routing = event.get('openrouter_metadata') or {}
+    for endpoint in (routing.get('endpoints') or {}).get('available') or []:
+        if isinstance(endpoint, dict) and endpoint.get('selected'):
+            return endpoint.get('provider')
+    served = [a for a in routing.get('attempts') or [] if isinstance(a, dict) and a.get('status') == 200]
+    return served[-1].get('provider') if served else event.get('provider')
+
+
+def stream_chat(url, headers, body, timeout):
     """POST a streaming chat completion; return the assembled assistant message and usage."""
-    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={
-        'content-type': 'application/json', 'user-agent': 'dsreview/1',
-        'cf-aig-authorization': 'Bearer ' + token, 'cf-aig-skip-cache': 'true',
-        'cf-aig-metadata': json.dumps({'app': 'dsreview'})})
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
     content, reasoning, calls, usage, meta, finish = [], [], {}, {}, {}, None
     done = False
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -205,13 +253,16 @@ def stream_chat(url, token, body, timeout):
                 ev = json.loads(data)
             except json.JSONDecodeError:
                 raise ConnectionError('truncated stream event')
+            if ev.get('error'):  # OpenRouter reports a failure after the 200 as an error event
+                raise ConnectionError(f'stream error: {json.dumps(ev["error"])[:300]}')
             meta['model'] = ev.get('model', meta.get('model'))
+            meta['host'] = served_by(ev) or meta.get('host')
             meta['fingerprint'] = ev.get('system_fingerprint', meta.get('fingerprint'))
             usage = ev.get('usage') or usage
             for choice in ev.get('choices') or []:
                 delta = choice.get('delta') or {}
                 content.append(delta.get('content') or '')
-                reasoning.append(delta.get('reasoning_content') or '')
+                reasoning.append(delta.get('reasoning_content') or delta.get('reasoning') or '')
                 for tc in delta.get('tool_calls') or []:
                     slot = calls.setdefault(tc.get('index', 0), {'id': '', 'type': 'function', 'function': {'name': '', 'arguments': ''}})
                     slot['id'] = tc.get('id') or slot['id']
@@ -229,14 +280,14 @@ def stream_chat(url, token, body, timeout):
     return message, usage, meta, finish
 
 
-def call(url, token, body, timeout):
+def call(url, headers, body, timeout):
     last = None
     for attempt in range(3):
         try:
-            return stream_chat(url, token, body, timeout)
+            return stream_chat(url, headers, body, timeout)
         except urllib.error.HTTPError as e:
             last = f'HTTP {e.code}: {e.read()[:300]!r}'
-            if e.code in (400, 401, 403, 404):
+            if e.code in (400, 401, 402, 403, 404):
                 break
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
             last = str(e)
@@ -277,12 +328,14 @@ def review(args):
     if args.base is None:
         args.base = 'HEAD'
     owners = allowed_owners(os.environ)
+    name = provider(os.environ)
+    routing = openrouter_routing(os.environ) if name == 'openrouter' else None
     url = args.url or gateway_url(os.environ)
-    model = (os.environ.get('DSREVIEW_MODEL') or '').strip() or DEFAULT_MODEL
+    model = (os.environ.get('DSREVIEW_MODEL') or '').strip() or DEFAULT_MODEL[name]
     args.repo = Path(git(args.repo, 'rev-parse', '--show-toplevel').strip())
     check_origin(args.repo, owners)
     brief = sys.stdin.read() if args.brief == '-' else Path(args.brief).read_text() if args.brief else '(no brief supplied)'
-    token = gateway_token(os.environ, args.token_file)
+    headers = request_headers(name, gateway_token(os.environ, args.token_file))
     system = Path(args.prompt).read_text()
     scratch = Path(tempfile.mkdtemp(prefix='dsreview-')).resolve()  # /var is a symlink on macOS
     try:
@@ -295,21 +348,30 @@ def review(args):
                     {'role': 'user', 'content': f'<brief>\n{brief}\n</brief>\n\n<diff>\n{diff}\n</diff>\n\n'
                                                 'Review the diff against the brief, using the tools as needed, then return the json object.'}]
         totals = {'prompt': 0, 'cache_hit': 0, 'cache_miss': 0, 'output': 0, 'reasoning': 0}
-        t0, tool_calls, meta, result, nudged = time.time(), 0, {}, None, False
-        for turn in range(1, args.max_turns + 1):
-            body = {'model': model,'reasoning_effort': args.effort, 'max_tokens': 64000, 'messages': messages,
+        t0, tool_calls, meta, result, nudged, billed = time.time(), 0, {}, None, False, None
+        # One recovery turn is available even after the forced final answer.
+        for turn in range(1, args.max_turns + 2):
+            body = {'model': model, 'max_tokens': 64000, 'messages': messages,
                     'stream': True, 'stream_options': {'include_usage': True}}
-            if turn < args.max_turns:
+            if name == 'openrouter':
+                body.update(reasoning={'effort': args.effort}, provider=routing)
+            else:
+                body['reasoning_effort'] = args.effort
+            if turn < args.max_turns and not nudged:
                 body.update(tools=TOOLS, tool_choice='auto')
-            message, usage, m, _ = call(url, token, body, args.timeout)
+            message, usage, m, _ = call(url, headers, body, args.timeout)
             meta.update({k: v for k, v in m.items() if v})
+            # DeepSeek reports prompt_cache_hit_tokens; OpenRouter reports prompt_tokens_details.cached_tokens.
+            hit = usage.get('prompt_cache_hit_tokens', (usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0)
             totals['prompt'] += usage.get('prompt_tokens', 0)
-            totals['cache_hit'] += usage.get('prompt_cache_hit_tokens', 0)
-            totals['cache_miss'] += usage.get('prompt_cache_miss_tokens', usage.get('prompt_tokens', 0) - usage.get('prompt_cache_hit_tokens', 0))
+            totals['cache_hit'] += hit
+            totals['cache_miss'] += usage.get('prompt_cache_miss_tokens', usage.get('prompt_tokens', 0) - hit)
+            if isinstance(usage.get('cost'), (int, float)):  # OpenRouter's billed amount
+                billed = (billed or 0) + usage['cost']
             totals['output'] += usage.get('completion_tokens', 0)
             totals['reasoning'] += (usage.get('completion_tokens_details') or {}).get('reasoning_tokens', 0)
             messages.append(message)  # reasoning_content must travel back when tools are in play
-            if message.get('tool_calls'):
+            if message.get('tool_calls') and turn < args.max_turns and not nudged:
                 for tc in message['tool_calls']:
                     try:
                         targs = json.loads(tc['function']['arguments'] or '{}')
@@ -323,14 +385,16 @@ def review(args):
                 if turn == args.max_turns - 6:
                     messages.append({'role': 'user', 'content': 'Few tool calls remain. Finish verifying, then return the json object.'})
                 continue
-            result = parse_review(message.get('content'))
+            # Never trust a verdict bundled with an unexpected tool request.
+            result = None if message.get('tool_calls') else parse_review(message.get('content'))
             if result and (usage.get('completion_tokens_details') or {}).get('reasoning_tokens', 0) > 0:
                 break
-            if nudged or turn >= args.max_turns:
+            if nudged:
                 break
-            # Observed: a reply that skips thinking or wraps prose around the json. Ask once more.
+            # Recover once from prose, leaked tool markup, or a reply that skips thinking.
             nudged = True
-            messages.append({'role': 'user', 'content': 'Return only the json object described in your instructions.'})
+            messages.append({'role': 'user', 'content': 'Tools are disabled. Return only the json object described in your instructions. '
+                                                        'Do not emit tool calls, markup, or prose.'})
         if result:
             anchor(result, root, diff)
         cost = (totals['cache_hit'] * PRICE['hit'] + totals['cache_miss'] * PRICE['miss'] + totals['output'] * PRICE['out']) / 1e6
@@ -338,10 +402,12 @@ def review(args):
             'verdict': result.get('verdict') if result else None,
             'summary': result.get('summary') if result else None,
             'findings': result.get('findings', []) if result else [],
-            'reviewer': 'dsreview', 'model': meta.get('model'), 'fingerprint': meta.get('fingerprint'),
+            'reviewer': 'dsreview', 'provider': name, 'host': meta.get('host'),
+            'model': meta.get('model'), 'fingerprint': meta.get('fingerprint'),
             'effort': args.effort, 'turns': turn, 'tool_calls': tool_calls, 'elapsed_s': round(time.time() - t0, 1),
             'usage': totals, 'cost_usd_peak': round(cost, 4),
-            'error': None if result else 'no parseable verdict: ' + (messages[-1].get('content') or '')[-300:],
+            'cost_usd': round(billed, 4) if billed is not None else None,
+            'error': None if result else 'no_parseable_verdict: JSON-only recovery failed: ' + (messages[-1].get('content') or '')[-300:],
         }
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
@@ -357,11 +423,11 @@ def main(argv=None):
     group.add_argument('--patch', help='review a patch file applied to base in a scratch tree')
     ap.add_argument('--brief', help='file holding the lane brief, or - for stdin')
     ap.add_argument('--effort', default='high', choices=['low', 'high', 'max'])
-    ap.add_argument('--max-turns', type=int, default=50)
+    ap.add_argument('--max-turns', type=int, default=50, help='review turns (default: 50), plus at most one JSON-only recovery turn')
     ap.add_argument('--timeout', type=int, default=900, help='seconds per model call')
     ap.add_argument('--out', type=Path, help='also write the JSON here')
     ap.add_argument('--verbose', action='store_true')
-    ap.add_argument('--url', help=argparse.SUPPRESS)  # default: DSREVIEW_URL or the AI Gateway URL
+    ap.add_argument('--url', help=argparse.SUPPRESS)  # default: DSREVIEW_URL, else the provider's URL
     ap.add_argument('--token-file', help=argparse.SUPPRESS)  # default: DSREVIEW_TOKEN, then DSREVIEW_TOKEN_FILE
     ap.add_argument('--prompt', default=str(here / 'system.md'), help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
