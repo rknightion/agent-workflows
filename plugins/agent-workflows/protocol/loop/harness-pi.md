@@ -95,8 +95,10 @@ repair round, an exact retry, a small harness or tooling fix, a lane dsreview di
 2. Push landed work with the root's `bash` (`git push origin main`); in `pr` mode, land it through
    its PR (contract section 6) and name each landing-branch push the audit flags.
 3. Stop your watchers (`watch_stop`) and timers (`wake_cancel`), then run
-   `loop-pi-audit closeout --run-dir "$LOOP_PI_RUN_DIR" --push-log "$LOOP_PI_RUN_DIR/push-log.jsonl"`
-   and report a nonzero result under `## Notes`, naming each flagged move the charter authorised.
+   `loop-pi-audit closeout --run-dir "$LOOP_PI_RUN_DIR" --push-log "$LOOP_PI_RUN_DIR/push-log.jsonl" --charter <abs charter> --state-log <abs codex/state-<date>-loop<N>.jsonl>`.
+   The charter digest comes from the state log's `open` event; never type one. A FETCHED tag is
+   not a violation. Report a nonzero result under `## Notes`, naming each flagged move the charter
+   authorised.
    Remove no lane tree yourself: list them under `## Notes` and ask the owner to run
    `/loop-closeout`, which you cannot call.
 4. Write the closeout file, then run the contract's reconcile and reply (section 12, steps 5 and 6).

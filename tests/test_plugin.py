@@ -1,4 +1,4 @@
-"""Checks on the published plugin: manifests, the loop skill's launch template, both hooks and loop-lint.
+"""Checks on the published plugin: manifests, the loop skill's launch template, hooks and loop-lint.
 
 Every test works in a temporary directory; nothing touches a Claude Code home or ~/.local/state.
 """
@@ -61,9 +61,10 @@ class Manifests(unittest.TestCase):
     def test_hook_commands_name_scripts_that_exist(self):
         hooks = json.loads(read(PLUGIN, "hooks", "hooks.json"))["hooks"]
         commands = [h["command"] for event in hooks.values() for group in event for h in group["hooks"]]
-        # Two loop hooks (brief header, fan-out continue) plus the tmux title-state hook on each
-        # session lifecycle event; every command must name a script shipped in this tree.
-        self.assertEqual(len({re.search(r'scripts/[^"]+', c).group(0) for c in commands}), 3)
+        # Root hooks, the lane-return check and the tmux session lifecycle hook must all ship.
+        self.assertEqual({re.search(r'scripts/[^"]+', c).group(0) for c in commands},
+                         {"scripts/brief_header.py", "scripts/fanout_continue.py",
+                          "scripts/lane_return.py", "scripts/tmux_title_state.sh"})
         for command in commands:
             script = re.search(r'"\$\{CLAUDE_PLUGIN_ROOT\}/([^"]+)"', command).group(1)
             self.assertTrue(os.path.isfile(os.path.join(PLUGIN, script)), script)

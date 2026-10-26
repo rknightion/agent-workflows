@@ -22,6 +22,18 @@
         ]
       }
     ],
+    "SubagentStop": [
+      {
+        "matcher": "^agent-workflows:(worker|senior|senior-escalation|reviewer|scout)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lane_return.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

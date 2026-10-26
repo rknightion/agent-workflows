@@ -24,12 +24,26 @@ Everything lives in `plugins/agent-workflows/`.
   | `agent-workflows:reviewer` | Opus 5.5 / high | read-only review, PASS or FAIL with findings |
   | `agent-workflows:scout` | Sonnet 5.5 / medium | read-only mapping, sweeps and log reduction |
 
-- `hooks/hooks.json` and `scripts/`: two hooks. The Stop hook re-prompts a root that ends its turn
+- `hooks/hooks.json` and `scripts/`: two root hooks. The Stop hook re-prompts a root that ends its turn
   before its closeout exists, up to three times in a row, unless its last line is a `PAUSED:` line
   or a `WAITING: ... until <UTC time>` line. The PreToolUse hook denies a root's lane dispatch
   whose brief does not open with the contract's header line. Both arm only in a session whose
   operator message is a loop launch ("You are the root" plus one closeout path), never in
   ordinary sessions, and both let the call through on any fault of their own.
+- The plugin also registers a global SubagentStop lane hook, `scripts/lane_return.py`. It
+  requires a nonempty `agent_id` and an exact `agent-workflows:worker`, `agent-workflows:senior`,
+  `agent-workflows:senior-escalation`, `agent-workflows:reviewer` or `agent-workflows:scout` type.
+  Root sessions (including `--agent`), unrelated agents and empty-type forks are no-ops; the
+  registration matcher alone is not the authority. Plugin-agent frontmatter hooks are not used.
+  It sends a lane back to repair its return when the lane-return block is missing, malformed or
+  duplicated, lacks or mistypes a field, names a patch whose sha256 does not match (the reason
+  names both hashes, or the unreadable path), or reports `complete` with a nonzero check exit.
+  Honest partial/blocked returns, read-only null patches and senior compose/board commit SHAs
+  remain valid. Return fences are limited to 1,800 UTF-16 units and JSON nesting to 32; decoder
+  failures block rather than fail open. The hook writes no state and repeated stops still
+  validate, but Claude's native consecutive-stop-block cap (default 8) can end a lane despite
+  later block requests. No hook inspects lane commands: the lanes' no-push rule lives in the agent
+  definitions.
 - `bin/loop-lint`: the charter, queue and `LOOP.md` linter. While the plugin is enabled it is on
   the Bash tool's PATH, so the skill, the root and the lanes run it as `loop-lint`.
 - `tools/dsreview/`: `dsreview`, a code reviewer for lanes. It sends a candidate change and its

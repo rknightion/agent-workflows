@@ -4,6 +4,10 @@ Read at launch with the contract and the charter.
 
 ## Launch
 
+Run the command after `cmd:` in a shell to start a fresh session; paste only the following lines
+into that session. Do not paste the `cmd:` line: it is not an instruction to an already-running
+Codex session and does not change that session's model or reasoning effort.
+
     cmd: codex -m gpt-6.1-sol -c model_reasoning_effort=high
     You are the root. Read <plugin root>/protocol/loop/contract.md, <plugin root>/protocol/loop/harness-codex.md
     and <abs charter path> in full. Write <abs closeout path> last, then reconcile and reply (contract section 12).
@@ -52,6 +56,18 @@ Read at launch with the contract and the charter.
 - With lanes in flight and no local work, make one `wait_agent` call (up to 19 minutes).
   **Returns arrive in context, not in the wait**: process every return already in context before
   each wait. After compaction, reconcile `list_agents` against `LANES.md` before the first wait.
+- For an owner-only wait with no live lanes or ready work, `wait_agent` has no child to wait on.
+  Keep the turn open with a foreground deadline timer instead; do not spawn a child just to wait.
+  Record `WAITING: <owner decision> until <UTC deadline>`, then start `exec_command` with
+  `yield_time_ms` 1000, running this command with the deadline substituted:
+
+      python3 -c 'import datetime,sys,time; time.sleep(max(0, (datetime.datetime.fromisoformat(sys.argv[1])-datetime.datetime.now(datetime.timezone.utc)).total_seconds()))' '<YYYY-MM-DDTHH:MM:SSZ>'
+
+  Record its `session_id`
+  if still running and hold the turn with bounded `write_stdin` calls on that session until it
+  exits; never end the turn expecting the timer to wake a stopped root. On an earlier owner reply,
+  stop the timer and reconcile. At expiry reconcile answers, ready work and the live listing:
+  if none arrived, park the waiting items as `owner` and close out (contract section 12).
 - A root with lanes in flight cannot also wait in an exec cell. Hand each process wait (main CI, a
   release) to a `scout` with the exact identity, terminal states and a deadline; its return quotes
   the raw readback. A deadline exit means "not observed".

@@ -68,6 +68,11 @@ Read these each time and never restate them here:
 
 ## Launch file
 
+For Codex, tell the owner to run the command after `cmd:` in a shell to start a fresh session and
+paste only the following lines into it. The `cmd:` line is shell launch metadata, not prompt text:
+pasting it into an already-running session changes neither its model nor its reasoning effort.
+Include this instruction when handing over the launch path.
+
 ```text
 cmd: <launcher command from the harness file>
 You are the root. Read ${CLAUDE_PLUGIN_ROOT}/protocol/loop/contract.md, ${CLAUDE_PLUGIN_ROOT}/protocol/loop/harness-<name>.md
