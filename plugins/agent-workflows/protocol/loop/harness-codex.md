@@ -10,7 +10,7 @@ Codex session and does not change that session's model or reasoning effort.
 
     cmd: codex -m gpt-6.1-sol -c model_reasoning_effort=high
     You are the root. Read <plugin root>/protocol/loop/contract.md, <plugin root>/protocol/loop/harness-codex.md
-    and <abs charter path> in full. Write <abs closeout path> last, then reconcile and reply (contract section 12).
+    and <abs charter path> in full. Write <abs closeout path> last, then reply (contract section 12).
     Standing: <abs path> sha256=<hex>
 
 - The `agent-workflows` Stop hook arms on "You are the root" plus one closeout path and releases a

@@ -10,7 +10,7 @@ Read at launch with the contract and the charter.
   charter, the closeout path and the `Standing:` file with its sha256:
 
       You are the root. Read <plugin root>/protocol/loop/contract.md, <plugin root>/protocol/loop/harness-pi.md
-      and <abs charter path> in full. Write <abs closeout path> last, then reconcile and reply (contract section 12).
+      and <abs charter path> in full. Write <abs closeout path> last, then reply (contract section 12).
       Standing: <abs path> sha256=<hex>
 
 - Launch runs the preflight and snapshots the remote for the audit. A cross-repo charter
@@ -101,7 +101,7 @@ repair round, an exact retry, a small harness or tooling fix, a lane dsreview di
    authorised.
    Remove no lane tree yourself: list them under `## Notes` and ask the owner to run
    `/loop-closeout`, which you cannot call.
-4. Write the closeout file, then run the contract's reconcile and reply (section 12, steps 5 and 6).
+4. Write the closeout file, then reply (section 12, step 5).
 
 ## Turn endings
 

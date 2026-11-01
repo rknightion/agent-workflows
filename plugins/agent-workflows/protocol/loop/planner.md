@@ -2,8 +2,7 @@
 
 Read by the `loop` skill only. Preparing a run should take minutes, not an hour.
 
-1. **Reconcile.** If you keep `codex/` on more than one machine, sync it so it
-   matches everywhere. Read the last closeout's `## Parked` and `## For ratification`; apply the owner's
+1. **Last run.** Read the last closeout's `## Parked` and `## For ratification`; apply the owner's
    answers as charter decisions.
 2. **Pick the number.** N is one more than the highest `loop<N>` in this repository's `codex/`.
 3. **Read the board.** `backlog task list --plain` and the owner's stated aim. Rank ready work by the

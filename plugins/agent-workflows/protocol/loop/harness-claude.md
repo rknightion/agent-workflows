@@ -8,7 +8,7 @@ The launch file's first line is the command; the message follows it:
 
     cmd: claude --model claude-opus-5-5 --effort medium
     You are the root. Read <plugin root>/protocol/loop/contract.md, <plugin root>/protocol/loop/harness-claude.md
-    and <abs charter path> in full. Write <abs closeout path> last, then reconcile and reply (contract section 12).
+    and <abs charter path> in full. Write <abs closeout path> last, then reply (contract section 12).
     Standing: <abs path> sha256=<hex>
     <each charter authority: or live: line touching customer data or a live system, verbatim>
 

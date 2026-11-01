@@ -297,8 +297,6 @@ name stops and returns.
      `## For ratification` (every ruling and open question from `DECISIONS.md` and
      `QUESTIONS.md`, each with your recommendation), `## Notes` (root session id, a usage
      summary where your tooling records one, anything the owner should know).
-  5. Then, if you keep `codex/` on more than one machine, sync it once so the closeout
-     reaches the others; state a failure, never retry it.
-  6. Reply with the closeout's absolute path and a short summary. The closeout is the
-     run's terminal file: only steps 5 and 6 follow it, on every harness.
+  5. Reply with the closeout's absolute path and a short summary. The closeout is the
+     run's terminal file: only this reply follows it, on every harness.
 - Every task ID in text the owner reads carries its meaning: `ID (title)`. Every path is absolute.
