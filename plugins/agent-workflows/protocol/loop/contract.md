@@ -288,8 +288,9 @@ name stops and returns.
      unmerged landing PR stays open under Parked with its number.
   2. Mark every landed task Done (`--check-ac` and `-s Done` in one call) and append one note line
      to each parked task with `--append-notes`.
-  3. Stop every watcher and lane you started. Remove each lane's worktree once its work has landed
-     or been archived (diff, untracked tarball, mbox of off-main commits, each verified).
+  3. Stop every watcher and lane you started, then run `<plugin root>/bin/loop-teardown closeout
+     --run-dir <abs codex/loop<N>> --apply` (pi: add `--run-dir "$LOOP_PI_RUN_DIR"`) and put its
+     summary under `## Notes`. `git worktree lock` keeps a tree.
   4. Write `codex/closeout-<date>-loop<N>.md` with line 1 exactly
      `# Closeout: <repo> loop<N> · Charter: <charter sha256>` and these sections:
      `## Landed` (a bullet per task: ID (title), SHA), `## Parked` (a bullet per task: ID, reason,

@@ -1,0 +1,1008 @@
+#!/usr/bin/env python3
+"""Tear down the worktrees, caches and big logs a loop run left behind (contract section 12, step 3).
+
+    loop-teardown closeout --run-dir <abs codex/loop<N>> [--run-dir <abs pi run dir>] [--apply]
+    loop-teardown reap --repo <abs repo> [--repo ...] [--stale-hours 72] [--apply]
+
+Dry run by default: it prints what it would do and changes nothing. `--apply` acts and writes the
+receipt `<run dir>/loop-teardown.json`.
+
+Which worktrees belong to a run:
+- every linked worktree of the repository whose path lies under a run dir, has a path component
+  `loop<N>` / `loop<N>-...` / `.loop<N>-worktrees`, or is named in the run's `LANES.md`, a lane's
+  `return.md` (`"worktree":` field) or loop-pi's `scratch-ledger.jsonl`;
+- every directory with a `.git` pointer file found beneath a run dir (any repository);
+- orphans: such a directory whose gitdir is gone or no longer points back, beneath a run dir or a
+  `loop<N>` child of `<repo>/worktrees`, `<repo>-wt`, `<repo>-worktrees` or `.loop<N>-worktrees`.
+
+What happens to each:
+- kept: locked (`git worktree lock` is the keep mark), `keep` in the loop-pi ledger, a live process
+  has its cwd there or names it in its argv, it holds this process's cwd, or (closeout only) it
+  carries loop-pi's allocation marker, which `/loop-closeout` releases;
+- removed: clean (`git status --porcelain --untracked-files=all` empty), no ignored content beyond
+  regenerable caches, and no commit off every remote-tracking ref;
+- archived, then removed with `--force`: anything else. The archive set is `tracked.diff`
+  (`git diff --binary HEAD`, verified by a reverse `git apply --check`), `untracked.tar.gz` and
+  `ignored.tar.gz` (verified by listing), `offremote.mbox` (verified: one message per non-merge
+  off-remote commit) and the ref `refs/archive/<label>/<path>` at HEAD, which keeps merges too;
+- an orphan is tarred whole (regenerable caches left out), verified by listing, then deleted.
+Nothing is fetched: a stale remote-tracking ref makes landed work look off-remote, so it is archived.
+
+Then each run dir loses its regenerable caches (node_modules, .terraform, Go build and module
+caches, OCI blobs, Terraform/OpenTofu providers, trivy databases), and each log-like file over
+`--log-mb` (50) is gzipped, verified by decompression, and leaves a `<name>.receipt.txt` text receipt
+(size, sha256, first and last lines). Nothing inside a kept worktree is touched.
+
+`reap` handles every `codex/loop<N>/` of each repository and every `~/.loop-pi-*/runs/*` holding one
+of its worktrees, plus `<repo>/.claude/worktrees/*`. A closed run (a `codex/closeout-*-loop<N>.md`,
+or loop-pi's `teardown.json`) is torn down at once; a run that never closed out only once its last
+activity is older than `--stale-hours`, no live process touches it, and its `LANES.md` lists no lane.
+
+Exit codes: 0 done (kept items are normal and listed), 1 an archive, verification or removal failed
+(that item is kept), 2 usage.
+"""
+import argparse
+from datetime import datetime, timezone
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+RECEIPT = 'loop-teardown.json'
+LOG_SUFFIXES = {'.log', '.jsonl', '.ndjson', '.txt', '.out', '.err'}
+REGEN_NAMES = {'node_modules', '.terraform', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache'}
+REGISTRIES = ('registry.terraform.io', 'registry.opentofu.org')
+WALK_BUDGET = 200_000
+RECEIPT_LINES = 40
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def git(*args, cwd=None, check=False, timeout=600):
+    argv = ['git', *(['-C', str(cwd)] if cwd else []), *map(str, args)]
+    result = subprocess.run(argv, capture_output=True, timeout=timeout)
+    if check and result.returncode:
+        raise TeardownError(f'git {" ".join(map(str, args))}: {result.stderr.decode(errors="replace").strip()}')
+    return result
+
+
+def out(*args, cwd=None):
+    result = git(*args, cwd=cwd)
+    return result.stdout.decode(errors='replace').strip() if result.returncode == 0 else None
+
+
+class TeardownError(Exception):
+    pass
+
+
+def real(path):
+    return Path(os.path.realpath(path))
+
+
+def rmtree_writable(path):
+    """shutil.rmtree for trees holding read-only directories, such as the Go module cache."""
+    for root, _dirs, _files in os.walk(path, followlinks=False):
+        os.chmod(root, os.stat(root, follow_symlinks=False).st_mode | 0o700)
+    shutil.rmtree(path)
+
+
+def within(path, root):
+    path, root = str(path), str(root)
+    return path == root or path.startswith(root.rstrip('/') + '/')
+
+
+def loop_component(n):
+    return re.compile(rf'^\.?loop{n}(?!\d)')
+
+
+# ---------- regenerable caches ----------
+
+def cache_kind(path):
+    """The kind of regenerable cache `path` is, or None. Content-identified where a name is not enough."""
+    name = path.name
+    if name in REGEN_NAMES:
+        return name
+    try:
+        if (path / 'trim.txt').is_file() and (path / '00').is_dir():
+            return 'go-build-cache'
+        if (path / 'cache' / 'download').is_dir() and not (path / '.git').exists():
+            return 'go-module-cache'
+        if name == 'blobs' and (path.parent / 'oci-layout').is_file():
+            return 'oci-blobs'
+        if any((path / r).is_dir() for r in REGISTRIES):
+            return 'terraform-providers'
+        if (path / 'trivy.db').is_file() or (path / 'trivy-java.db').is_file():
+            return 'trivy-db'
+    except OSError:
+        return None
+    return None
+
+
+def tree_bytes(path):
+    total = 0
+    for root, dirs, files in os.walk(path, followlinks=False):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+# ---------- processes ----------
+
+def process_cwds(pids):
+    """{pid: cwd} read directly (libproc on macOS, /proc on Linux), else from lsof; unreadable pids are left out."""
+    found = {}
+    if sys.platform == 'darwin':
+        try:
+            import ctypes
+            libproc = ctypes.CDLL('/usr/lib/libproc.dylib')
+            # struct proc_vnodepathinfo: two vnode_info_path {vnode_info (152 bytes), char path[1024]}.
+            buf = ctypes.create_string_buffer(2 * (152 + 1024))
+            for pid in pids:
+                if libproc.proc_pidinfo(pid, 9, ctypes.c_uint64(0), buf, len(buf)) == len(buf):
+                    path = buf.raw[152:152 + 1024].split(b'\0', 1)[0].decode(errors='replace')
+                    if path:
+                        found[pid] = path
+            return found
+        except (OSError, AttributeError):
+            found = {}
+    elif Path('/proc/self/cwd').exists():
+        for pid in pids:
+            try:
+                found[pid] = os.readlink(f'/proc/{pid}/cwd')
+            except OSError:
+                pass
+        return found
+    lsof = shutil.which('lsof') or '/usr/sbin/lsof'
+    try:
+        res = subprocess.run([lsof, '-n', '-P', '-w', '-d', 'cwd', '-F', 'pn'], capture_output=True, text=True,
+                             errors='replace', timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return found
+    pid = None
+    for line in res.stdout.splitlines():
+        if line.startswith('p'):
+            pid = int(line[1:])
+        elif line.startswith('n') and pid is not None:
+            found[pid] = line[1:]
+    return found
+
+
+def process_table():
+    """[(pid, ppid, cwd or None, argv string)] for every visible process."""
+    procs = {}
+    ps = subprocess.run(['ps', '-axww', '-o', 'pid=,ppid=,command='], capture_output=True, text=True,
+                        errors='replace')
+    for line in ps.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit():
+            procs[int(parts[0])] = [int(parts[1]), None, parts[2] if len(parts) > 2 else '']
+    cwd_of = process_cwds(list(procs))
+    for pid, cwd in cwd_of.items():
+        if pid in procs:
+            procs[pid][1] = cwd
+    mine = set()
+    pid = os.getpid()
+    while pid and pid not in mine:
+        mine.add(pid)
+        pid = procs.get(pid, [0])[0]
+    return [(p, v[0], v[1], v[2]) for p, v in procs.items() if p not in mine]
+
+
+def live_users(paths, table):
+    """Processes whose cwd is inside, or whose argv names, any of `paths`."""
+    hits = []
+    for pid, _, cwd, argv in table:
+        for path in paths:
+            if (cwd and within(real(cwd), path)) or str(path) in argv:
+                hits.append(f'{pid} {argv[:80]}')
+                break
+    return hits
+
+
+# ---------- worktree discovery ----------
+
+class Tree:
+    def __init__(self, path, source):
+        self.path = path
+        self.sources = [source]
+        self.common = None
+        self.gitdir = None
+        self.orphan = False
+        self.locked = False
+        self.ledger_keep = False
+
+    def as_dict(self):
+        return {'path': str(self.path), 'common': str(self.common) if self.common else None,
+                'source': ','.join(self.sources)}
+
+
+def pointer_gitdir(path):
+    """The gitdir a linked worktree's `.git` file names, or None."""
+    dotgit = path / '.git'
+    try:
+        if not dotgit.is_file() or dotgit.is_symlink():
+            return None
+        text = dotgit.read_text(errors='replace').strip()
+    except OSError:
+        return None
+    if not text.startswith('gitdir:'):
+        return None
+    target = Path(text[len('gitdir:'):].strip())
+    return target if target.is_absolute() else (path / target)
+
+
+def resolve_tree(tree):
+    gitdir = pointer_gitdir(tree.path)
+    if gitdir is None:
+        return False
+    gitdir = real(gitdir)
+    if gitdir.parent.name != 'worktrees':
+        return False  # a submodule or separate-git-dir checkout, not a linked worktree
+    back = gitdir / 'gitdir'
+    try:
+        points = real(back.read_text().strip()) == real(tree.path / '.git')
+    except OSError:
+        points = False
+    if not points:
+        tree.orphan = True
+        return True
+    tree.gitdir = gitdir
+    common = gitdir / 'commondir'
+    try:
+        rel = common.read_text().strip()
+        tree.common = real(gitdir / rel)
+    except OSError:
+        tree.common = real(gitdir.parent.parent)
+    tree.locked = (gitdir / 'locked').exists()
+    return True
+
+
+def worktree_list(repo):
+    """[(path, prunable)] of the linked worktrees of `repo` (the main worktree left out)."""
+    text = out('worktree', 'list', '--porcelain', cwd=repo)
+    if text is None:
+        return []
+    entries, first = [], True
+    for block in text.split('\n\n'):
+        lines = block.splitlines()
+        if not lines or not lines[0].startswith('worktree '):
+            continue
+        if first:
+            first = False
+            continue
+        entries.append((Path(lines[0][len('worktree '):]), any(l.startswith('prunable') for l in lines)))
+    return entries
+
+
+def bounded_walk(root, budget):
+    """Yield directories beneath root (not following links), not descending into worktrees, .git or caches."""
+    stack = [root]
+    while stack and budget[0] > 0:
+        top = stack.pop()
+        try:
+            entries = list(os.scandir(top))
+        except OSError:
+            continue
+        for entry in entries:
+            budget[0] -= 1
+            if not entry.is_dir(follow_symlinks=False) or entry.name == '.git':
+                continue
+            path = Path(entry.path)
+            yield path
+            if (path / '.git').exists() or cache_kind(path):
+                continue
+            stack.append(path)
+
+
+def ledger_entries(run_dir):
+    entries = {}
+    ledger = run_dir / 'scratch-ledger.jsonl'
+    if not ledger.is_file():
+        return entries
+    for line in ledger.read_text(errors='replace').splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and isinstance(rec.get('path'), str):
+            entries[str(real(rec['path']))] = rec
+    return entries
+
+
+def named_paths(run_dir):
+    """Absolute paths LANES.md and the lanes' return.md name as worktrees."""
+    paths = set()
+    lanes = run_dir / 'LANES.md'
+    if lanes.is_file():
+        paths.update(re.findall(r'(/[^\s|`\'",;()]+)', lanes.read_text(errors='replace')))
+    for ret in run_dir.glob('*/return.md'):
+        try:
+            paths.update(re.findall(r'"worktree"\s*:\s*"(/[^"]+)"', ret.read_text(errors='replace')))
+        except OSError:
+            pass
+    return paths
+
+
+def live_lanes(run_dir):
+    """LANES.md lines that still list a lane: not blank, a heading, a comment, a table header or rule."""
+    lanes = run_dir / 'LANES.md'
+    if not lanes.is_file():
+        return []
+    lines = lanes.read_text(errors='replace').splitlines()
+    live = []
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if not s or s.startswith(('#', '<!--', '>')) or re.fullmatch(r'\|?[\s:|-]+\|?', s):
+            continue
+        nxt = lines[i + 1].strip() if i + 1 < len(lines) else ''
+        if s.startswith('|') and re.fullmatch(r'\|[\s:|-]+\|?', nxt):
+            continue
+        if re.fullmatch(r'[-*]?\s*\(?(none|no live lanes?|empty)\)?\.?', s, re.I):
+            continue
+        live.append(s)
+    return live
+
+
+class Run:
+    """One run: its run dirs, repository and loop number where known."""
+
+    def __init__(self, run_dirs, repo=None, number=None):
+        self.run_dirs = [real(d) for d in run_dirs]
+        self.repo = real(repo) if repo else None
+        self.number = number
+        for d in self.run_dirs:
+            m = re.fullmatch(r'loop(\d+)', d.name)
+            if m and d.parent.name == 'codex':
+                self.number = self.number or m.group(1)
+                self.repo = self.repo or d.parent.parent
+        self.ledger = {}
+        for d in self.run_dirs:
+            self.ledger.update(ledger_entries(d))
+
+    def primary(self):
+        return self.run_dirs[0]
+
+    def closed(self):
+        for d in self.run_dirs:
+            if (d / 'teardown.json').is_file():
+                return True
+        if self.repo and self.number:
+            return any((self.repo / 'codex').glob(f'closeout-*-loop{self.number}.md'))
+        return False
+
+    def worktree_roots(self):
+        roots = list(self.run_dirs)
+        if self.repo and self.number:
+            p = self.repo
+            for base in (p / 'worktrees', p.parent / f'{p.name}-wt', p.parent / f'{p.name}-worktrees',
+                         p.parent / f'.loop{self.number}-worktrees'):
+                roots.append(base)
+        return roots
+
+    def discover(self):
+        trees = {}
+
+        def add(path, source):
+            path = real(path)
+            if path in trees:
+                if source not in trees[path].sources:
+                    trees[path].sources.append(source)
+                return
+            tree = Tree(path, source)
+            if not path.exists():
+                trees[path] = tree
+                return
+            if resolve_tree(tree):
+                trees[path] = tree
+
+        pattern = loop_component(self.number) if self.number else None
+        common = out('rev-parse', '--path-format=absolute', '--git-common-dir', cwd=self.repo) if self.repo else None
+        own_common = real(common) if common else None
+        prunable = []
+        if self.repo:
+            for path, is_prunable in worktree_list(self.repo):
+                rpath = real(path)
+                hit = None
+                if any(within(rpath, d) for d in self.run_dirs):
+                    hit = 'run-dir'
+                elif pattern and any(pattern.match(c) for c in rpath.relative_to(rpath.anchor).parts):
+                    hit = f'loop{self.number}-name'
+                if hit and is_prunable:
+                    prunable.append(str(path))
+                elif hit:
+                    add(path, hit)
+        named = named_paths(self.primary()) if self.run_dirs else set()
+        for d in self.run_dirs[1:]:
+            named |= named_paths(d)
+        for path in named:
+            if Path(path).is_dir() and (Path(path) / '.git').is_file():
+                add(path, 'named')
+        for path, rec in self.ledger.items():
+            if rec.get('type') == 'worktree' or rec.get('kind') == 'worktree':
+                if Path(path).is_dir():
+                    add(path, 'ledger')
+        budget = [WALK_BUDGET]
+        for d in self.run_dirs:
+            for sub in bounded_walk(d, budget):
+                if (sub / '.git').is_file():
+                    add(sub, 'run-dir')
+        for root in self.worktree_roots()[len(self.run_dirs):]:
+            try:
+                children = [c for c in root.iterdir() if c.is_dir() and not c.is_symlink()]
+            except OSError:
+                continue
+            for child in children:
+                if not (child / '.git').is_file() or not (pattern.match(child.name) or root.name.startswith('.loop')):
+                    continue
+                probe = Tree(real(child), 'worktree-root')
+                # A shared root such as .loop<N>-worktrees also holds other repositories' loop N trees.
+                if resolve_tree(probe) and (probe.orphan or probe.common == own_common):
+                    add(child, 'worktree-root')
+        for tree in trees.values():
+            rec = self.ledger.get(str(tree.path))
+            tree.ledger_keep = bool(rec and rec.get('keep'))
+        if budget[0] <= 0:
+            raise TeardownError(f'walk budget of {WALK_BUDGET} entries exhausted beneath {self.run_dirs}')
+        self.prunable = prunable
+        return sorted(trees.values(), key=lambda t: len(str(t.path)), reverse=True)
+
+    def last_activity(self, trees):
+        newest = 0.0
+        budget = [WALK_BUDGET]
+        for d in self.run_dirs:
+            try:
+                newest = max(newest, d.lstat().st_mtime)
+            except OSError:
+                pass
+            stack = [d]
+            while stack and budget[0] > 0:
+                top = stack.pop()
+                try:
+                    entries = list(os.scandir(top))
+                except OSError:
+                    continue
+                for entry in entries:
+                    budget[0] -= 1
+                    try:
+                        newest = max(newest, entry.stat(follow_symlinks=False).st_mtime)
+                    except OSError:
+                        continue
+                    if entry.is_dir(follow_symlinks=False) and entry.name != '.git':
+                        path = Path(entry.path)
+                        if not (path / '.git').exists() and not cache_kind(path):
+                            stack.append(path)
+        if budget[0] <= 0:
+            return None
+        for tree in trees:
+            for p in [tree.path] + ([tree.gitdir / n for n in ('index', 'HEAD', 'logs/HEAD')] if tree.gitdir else []):
+                try:
+                    newest = max(newest, p.lstat().st_mtime)
+                except OSError:
+                    pass
+        return newest
+
+
+# ---------- archive ----------
+
+def ref_component(part):
+    part = re.sub(r'[^A-Za-z0-9._-]+', '-', part).lstrip('.-')
+    part = re.sub(r'\.{2,}', '.', part)
+    while part.endswith('.lock') or part.endswith('.'):
+        part = part[:-5] if part.endswith('.lock') else part[:-1]
+    return part or '_'
+
+
+def archive_ref(label, path, home):
+    rel = path.relative_to(home) if within(path, home) else path.relative_to(path.anchor)
+    ref = 'refs/archive/' + '/'.join([ref_component(label)] + [ref_component(p) for p in rel.parts])
+    if git('check-ref-format', ref).returncode:
+        ref = 'refs/archive/' + ref_component(label) + '/' + hashlib.sha256(str(path).encode()).hexdigest()[:16]
+    return ref
+
+
+def archive_slot(archive_root, path, home):
+    rel = path.relative_to(home) if within(path, home) else path.relative_to(path.anchor)
+    slot = archive_root / '_'.join(ref_component(p) for p in rel.parts)
+    n = 1
+    while slot.exists():
+        n += 1
+        slot = archive_root / ('_'.join(ref_component(p) for p in rel.parts) + f'.{n}')
+    return slot
+
+
+def is_regenerable(root, rel):
+    """Whether `rel` (relative to worktree `root`) lies inside a regenerable cache within that worktree.
+
+    Names only: content-shaped detection (cache_kind) is for run-dir evidence. Anything this decides
+    is regenerable is left out of an archive and then deleted, so a user directory that merely looks
+    like a cache must never match here."""
+    return any(part in REGEN_NAMES for part in Path(rel.rstrip('/')).parts)
+
+
+def ignored_entries(tree):
+    """Ignored paths in a worktree that are not regenerable caches (relative, dirs end in /)."""
+    res = git('ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z', cwd=tree.path)
+    keep = []
+    for rel in res.stdout.decode(errors='surrogateescape').split('\0'):
+        if rel and not is_regenerable(tree.path, rel):
+            keep.append(rel)
+    return keep
+
+
+def tar_listing(tarball):
+    res = subprocess.run(['tar', '-tzf', str(tarball)], capture_output=True)
+    if res.returncode:
+        raise TeardownError(f'tar -t {tarball}: {res.stderr.decode(errors="replace").strip()}')
+    return {l.rstrip('/') for l in res.stdout.decode(errors='surrogateescape').splitlines() if l}
+
+
+def make_tar(cwd, names, tarball, exclude=()):
+    listfile = tarball.with_suffix('.list')
+    listfile.write_bytes(b'\0'.join(n.rstrip('/').encode(errors='surrogateescape') for n in names) + b'\0')
+    argv = ['tar', '-czf', str(tarball)] + [f'--exclude={e}' for e in exclude] + ['--null', '-T', str(listfile)]
+    # COPYFILE_DISABLE keeps macOS tar from adding ._ AppleDouble entries.
+    res = subprocess.run(argv, cwd=str(cwd), capture_output=True, env={**os.environ, 'COPYFILE_DISABLE': '1'})
+    listfile.unlink()
+    if res.returncode:
+        raise TeardownError(f'tar {tarball}: {res.stderr.decode(errors="replace").strip()}')
+    listed = tar_listing(tarball)
+    missing = [n for n in names if n.rstrip('/') not in listed]
+    if missing:
+        raise TeardownError(f'{tarball} lacks {len(missing)} entries, first {missing[0]}')
+
+
+def archive_tree(tree, slot, label, home):
+    """Write and verify the step 3 archive set for one registered worktree; returns what was written."""
+    slot.mkdir(parents=True)
+    wrote = {}
+    head = out('rev-parse', '--verify', '-q', 'HEAD', cwd=tree.path)
+    branch = out('symbolic-ref', '-q', '--short', 'HEAD', cwd=tree.path)
+    diff = git('diff', '--binary', 'HEAD', cwd=tree.path, check=True).stdout if head else b''
+    if diff:
+        (slot / 'tracked.diff').write_bytes(diff)
+        if git('apply', '--check', '-R', '--binary', str(slot / 'tracked.diff'), cwd=tree.path).returncode:
+            raise TeardownError('tracked.diff does not reverse-apply to the worktree')
+        wrote['tracked.diff'] = len(diff)
+    untracked = [n for n in git('ls-files', '--others', '--exclude-standard', '-z', cwd=tree.path,
+                                check=True).stdout.decode(errors='surrogateescape').split('\0') if n]
+    untracked = [n for n in untracked if not is_regenerable(tree.path, n)]
+    if untracked:
+        make_tar(tree.path, untracked, slot / 'untracked.tar.gz', exclude=sorted(REGEN_NAMES))
+        wrote['untracked.tar.gz'] = len(untracked)
+    ignored = ignored_entries(tree)
+    if ignored:
+        make_tar(tree.path, ignored, slot / 'ignored.tar.gz', exclude=sorted(REGEN_NAMES))
+        wrote['ignored.tar.gz'] = len(ignored)
+    if head:
+        commits = int(out('rev-list', '--count', '--no-merges', 'HEAD', '--not', '--remotes', cwd=tree.path) or 0)
+        if commits:
+            mbox = git('format-patch', '--stdout', '--binary', 'HEAD', '--not', '--remotes', cwd=tree.path,
+                       check=True).stdout
+            (slot / 'offremote.mbox').write_bytes(mbox)
+            got = len(re.findall(rb'^From [0-9a-f]{40} ', mbox, re.M))
+            if got != commits:
+                raise TeardownError(f'offremote.mbox holds {got} messages for {commits} non-merge commits')
+            wrote['offremote.mbox'] = commits
+        ref = archive_ref(label, tree.path, home)
+        git('update-ref', ref, head, cwd=tree.path, check=True)
+        if out('rev-parse', '--verify', '-q', ref, cwd=tree.path) != head:
+            raise TeardownError(f'{ref} does not resolve to {head}')
+        wrote['ref'] = ref
+    (slot / 'meta.txt').write_text(
+        f'worktree={tree.path}\ncommon={tree.common}\nhead={head}\nbranch={branch}\narchived={label}\n'
+        + ''.join(f'{k}={v}\n' for k, v in wrote.items()))
+    return wrote
+
+
+def archive_orphan(tree, slot):
+    slot.mkdir(parents=True)
+    names = sorted(e.name for e in os.scandir(tree.path) if not is_regenerable(tree.path, e.name))
+    tarball = slot / 'orphan.tar.gz'
+    if names:
+        make_tar(tree.path, names, tarball, exclude=sorted(REGEN_NAMES))
+    pointer = pointer_gitdir(tree.path)
+    (slot / 'meta.txt').write_text(f'orphan={tree.path}\ngitdir={pointer}\nentries={len(names)}\n')
+    return {'orphan.tar.gz': len(names)}
+
+
+# ---------- deciding ----------
+
+def safe_to_delete(path, guards):
+    for g in guards:
+        if within(g, path):
+            return False
+    return True
+
+
+def decide(tree, mode, table, guards):
+    """(action, reason, facts) for one tree; action is keep, remove, archive or absent."""
+    if not tree.path.exists():
+        return 'absent', 'nothing at the path', {}
+    if not safe_to_delete(tree.path, guards):
+        return 'keep', 'holds a protected path (home, a repository checkout, a run dir or this cwd)', {}
+    if tree.orphan:
+        users = live_users([tree.path], table)
+        if users:
+            return 'keep', f'live process: {users[0]}', {}
+        return 'orphan', 'its gitdir is gone or no longer points back', {}
+    if tree.locked:
+        return 'keep', 'locked (git worktree lock)', {}
+    if tree.ledger_keep:
+        return 'keep', 'keep in the loop-pi scratch ledger', {}
+    if mode == 'closeout' and tree.gitdir and (tree.gitdir / 'loop-pi-allocation').exists():
+        return 'keep', 'loop-pi allocation: /loop-closeout releases it', {}
+    users = live_users([tree.path], table)
+    if users:
+        return 'keep', f'live process: {users[0]}', {}
+    status = git('status', '--porcelain', '--untracked-files=all', cwd=tree.path)
+    if status.returncode:
+        return 'keep', f'git status failed: {status.stderr.decode(errors="replace").strip()[:120]}', {}
+    head = out('rev-parse', '--verify', '-q', 'HEAD', cwd=tree.path)
+    off = int(out('rev-list', '--count', 'HEAD', '--not', '--remotes', cwd=tree.path) or 0) if head else 0
+    ignored = ignored_entries(tree)
+    facts = {'status_lines': len(status.stdout.splitlines()), 'offremote': off, 'ignored': len(ignored)}
+    if not status.stdout.strip() and not off and not ignored:
+        return 'remove', 'clean and landed', facts
+    why = [w for w, n in (('dirty', facts['status_lines']), ('off-remote commits', off),
+                          ('ignored content', len(ignored))) if n]
+    return 'archive', ', '.join(why), facts
+
+
+def remove_tree(tree, force):
+    argv = ['--git-dir', str(tree.common), 'worktree', 'remove'] + (['--force'] if force else []) + [str(tree.path)]
+    git(*argv, check=True)
+    if tree.path.exists():
+        raise TeardownError('still present after git worktree remove')
+
+
+# ---------- caches and logs ----------
+
+def strip_run_dir(run_dir, kept, apply, log_bytes, label):
+    caches, logs, errors = [], [], []
+    stack = [run_dir]
+    budget = WALK_BUDGET
+    while stack and budget > 0:
+        top = stack.pop()
+        try:
+            entries = list(os.scandir(top))
+        except OSError:
+            continue
+        for entry in entries:
+            budget -= 1
+            path = Path(entry.path)
+            if any(within(path, k) or within(k, path) for k in kept):
+                if not any(within(path, k) for k in kept) and entry.is_dir(follow_symlinks=False):
+                    stack.append(path)
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                if entry.name == '.git' or (path / '.git').exists():
+                    continue
+                kind = cache_kind(path)
+                if kind:
+                    size = tree_bytes(path)
+                    caches.append({'path': str(path), 'kind': kind, 'bytes': size})
+                    if apply:
+                        try:
+                            rmtree_writable(path)
+                        except OSError as error:
+                            errors.append(f'{path}: {error}')
+                    continue
+                stack.append(path)
+            elif entry.is_file(follow_symlinks=False) and path.suffix in LOG_SUFFIXES:
+                try:
+                    size = entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue
+                if size > log_bytes:
+                    rec = {'path': str(path), 'bytes': size}
+                    if apply:
+                        try:
+                            rec.update(compress_log(path, label))
+                        except (OSError, TeardownError) as error:
+                            errors.append(f'{path}: {error}')
+                            continue
+                    logs.append(rec)
+    return caches, logs, errors
+
+
+def compress_log(path, label):
+    gz = path.with_name(path.name + '.gz')
+    if gz.exists():
+        raise TeardownError(f'{gz} already exists')
+    try:
+        digest = hashlib.sha256()
+        head, tail = [], []
+        with open(path, 'rb') as src, gzip.open(gz, 'wb') as dst:
+            for line in src:
+                digest.update(line)
+                dst.write(line)
+                if len(head) < RECEIPT_LINES:
+                    head.append(line)
+                else:
+                    tail.append(line)
+                    if len(tail) > RECEIPT_LINES:
+                        tail.pop(0)
+        check = hashlib.sha256()
+        with gzip.open(gz, 'rb') as back:
+            for chunk in iter(lambda: back.read(1 << 20), b''):
+                check.update(chunk)
+        if check.hexdigest() != digest.hexdigest():
+            raise TeardownError('gzip round trip does not match')
+        size = path.stat().st_size
+
+        def show(lines):
+            return ''.join(l[:500].decode(errors='replace').rstrip('\n') + '\n' for l in lines)
+        receipt = path.with_name(path.name + '.receipt.txt')
+        receipt.write_text(f'{path.name} compressed to {gz.name} by loop-teardown {label}\n'
+                           f'bytes={size}\nsha256={digest.hexdigest()}\n'
+                           f'--- first {len(head)} lines ---\n{show(head)}--- last {len(tail)} lines ---\n{show(tail)}')
+        path.unlink()
+    except BaseException:
+        gz.unlink(missing_ok=True)
+        raise
+    return {'gz': str(gz), 'sha256': digest.hexdigest(), 'receipt': str(receipt)}
+
+
+# ---------- one run ----------
+
+def teardown(run, mode, args, table, label, home, archive_root):
+    report = {'run_dirs': [str(d) for d in run.run_dirs], 'repo': str(run.repo) if run.repo else None,
+              'loop': run.number, 'worktrees': [], 'caches': [], 'logs': [], 'errors': []}
+    trees = run.discover()
+    report['prunable'] = run.prunable
+    guards = [home, Path.cwd().resolve(), *run.run_dirs]
+    if run.repo:
+        guards.append(run.repo)
+    for tree in trees:
+        if tree.common:
+            guards.append(tree.common.parent if tree.common.name == '.git' else tree.common)
+    if mode == 'reap' and not run.closed():
+        lanes = [l for d in run.run_dirs for l in live_lanes(d)]
+        newest = run.last_activity(trees)
+        idle = time.time() - newest if newest is not None else 0.0
+        users = live_users(run.run_dirs + [t.path for t in trees], table)
+        fence = None
+        if lanes:
+            fence = f'LANES.md lists {len(lanes)} live lane(s); clear it to reap'
+        elif users:
+            fence = f'live process: {users[0]}'
+        elif newest is None:
+            fence = f'too large to judge its last activity within {WALK_BUDGET} entries'
+        elif idle < args.stale_hours * 3600:
+            fence = f'not closed out and last active {idle / 3600:.1f}h ago (threshold {args.stale_hours}h)'
+        if fence:
+            report['fenced'] = fence
+            return report
+        report['reaped'] = f'never closed out; last active {idle / 3600:.1f}h ago'
+    kept = []
+    for tree in trees:
+        action, reason, facts = decide(tree, mode, table, guards)
+        item = {**tree.as_dict(), 'action': action, 'reason': reason, **facts}
+        report['worktrees'].append(item)
+        if action == 'keep':
+            kept.append(tree.path)
+        if not args.apply or action in ('keep', 'absent'):
+            continue
+        try:
+            if action == 'remove':
+                remove_tree(tree, force=False)
+                item['outcome'] = 'removed'
+            elif action == 'archive':
+                slot = archive_slot(archive_root, tree.path, home)
+                item['archive'] = str(slot)
+                item['archived'] = archive_tree(tree, slot, label, home)
+                remove_tree(tree, force=True)
+                item['outcome'] = 'archived and removed'
+            elif action == 'orphan':
+                slot = archive_slot(archive_root, tree.path, home)
+                item['archive'] = str(slot)
+                item['archived'] = archive_orphan(tree, slot)
+                rmtree_writable(tree.path)
+                item['outcome'] = 'archived and removed'
+        except (OSError, subprocess.SubprocessError, TeardownError, ValueError) as error:
+            item['outcome'] = 'kept'
+            item['error'] = str(error)
+            report['errors'].append(f'{tree.path}: {error}')
+            kept.append(tree.path)
+    for d in run.run_dirs:
+        if d.is_dir():
+            caches, logs, errors = strip_run_dir(d, kept, args.apply, args.log_mb * 1024 * 1024, label)
+            report['caches'] += caches
+            report['logs'] += logs
+            report['errors'] += errors
+    return report
+
+
+def summary(report):
+    counts = {}
+    for w in report['worktrees']:
+        key = w.get('outcome') or ('would ' + w['action'] if w['action'] not in ('keep', 'absent') else w['action'])
+        counts[key] = counts.get(key, 0) + 1
+    parts = [f'{n} {k}' for k, n in sorted(counts.items())] or ['no worktrees']
+    cache_gb = sum(c['bytes'] for c in report['caches']) / 1e9
+    parts.append(f'{len(report["caches"])} caches ({cache_gb:.1f} GB)')
+    parts.append(f'{len(report["logs"])} logs over the limit')
+    if report.get('fenced'):
+        parts = [f'fenced: {report["fenced"]}']
+    if report['errors']:
+        parts.append(f'{len(report["errors"])} errors')
+    return f'{", ".join(report["run_dirs"])}: ' + '; '.join(parts)
+
+
+def print_report(report, apply):
+    print(summary(report))
+    for w in report['worktrees']:
+        print(f'  {(w.get("outcome") or w["action"]).upper():<24} {w["path"]}  ({w["reason"]})'
+              + (f' -> {w["archive"]}' if w.get('archive') else '') + (f' ERROR {w["error"]}' if w.get('error') else ''))
+    for p in report.get('prunable', []):
+        print(f'  {"PRUNABLE":<24} {p}  (registered, directory gone; git worktree prune clears it)')
+    verb = '' if apply else 'WOULD '
+    for c in report['caches']:
+        print(f'  {verb}STRIP {c["kind"]:<18} {c["path"]} ({c["bytes"] / 1e6:.0f} MB)')
+    for l in report['logs']:
+        print(f'  {verb}GZIP {l["path"]} ({l["bytes"] / 1e6:.0f} MB)')
+    for e in report['errors']:
+        print(f'  ERROR {e}', file=sys.stderr)
+
+
+def write_receipt(run, report, mode, label, archive_root):
+    receipt = {'v': 1, 'at': label, 'mode': mode, 'archive_root': str(archive_root), **report}
+    target = run.primary() / RECEIPT
+    tmp = target.with_suffix('.json.tmp')
+    tmp.write_text(json.dumps(receipt, indent=1, sort_keys=True) + '\n')
+    tmp.replace(target)
+    return target
+
+
+# ---------- reap discovery ----------
+
+def reap_runs(repos, home):
+    runs = []
+    commons = {}
+    for repo in repos:
+        common = out('rev-parse', '--path-format=absolute', '--git-common-dir', cwd=repo)
+        if common:
+            commons[real(common)] = repo
+        for d in sorted((repo / 'codex').glob('loop*')):
+            if d.is_dir() and re.fullmatch(r'loop\d+', d.name):
+                runs.append(Run([d]))
+    for d in sorted(home.glob('.loop-pi-*/runs/*')):
+        if not d.is_dir() or d.is_symlink():
+            continue
+        owner = None
+        for wt in (d / 'worktrees').glob('*') if (d / 'worktrees').is_dir() else []:
+            t = Tree(real(wt), 'run-dir')
+            if resolve_tree(t) and t.common in commons:
+                owner = commons[t.common]
+                break
+        if owner is None:
+            owner = next((r for r in repos if f'-{r.name}-' in d.name), None)
+        if owner is not None:
+            runs.append(Run([d], repo=owner))
+    return runs
+
+
+def claude_isolation(repo, args, table, home, label, archive_root):
+    """Claude Code `isolation: worktree` trees under <repo>/.claude/worktrees, reaped once stale."""
+    report = {'run_dirs': [str(repo / '.claude' / 'worktrees')], 'repo': str(repo), 'loop': None,
+              'worktrees': [], 'caches': [], 'logs': [], 'errors': [], 'prunable': []}
+    base = real(repo / '.claude' / 'worktrees')
+    guards = [home, Path.cwd().resolve(), repo]
+    for path, prunable in worktree_list(repo):
+        rpath = real(path)
+        if not within(rpath, base) or rpath == base:
+            continue
+        if prunable:
+            report['prunable'].append(str(path))
+            continue
+        tree = Tree(rpath, 'claude-isolation')
+        if not resolve_tree(tree) or tree.orphan:
+            continue
+        newest = max((p.lstat().st_mtime for p in [tree.path] + [tree.gitdir / n for n in ('index', 'HEAD')]
+                      if p.exists()), default=0)
+        idle = time.time() - newest
+        if idle < args.stale_hours * 3600:
+            report['worktrees'].append({**tree.as_dict(), 'action': 'keep',
+                                        'reason': f'active {idle / 3600:.1f}h ago (threshold {args.stale_hours}h)'})
+            continue
+        action, reason, facts = decide(tree, 'reap', table, guards)
+        item = {**tree.as_dict(), 'action': action, 'reason': reason, **facts}
+        report['worktrees'].append(item)
+        if not args.apply or action in ('keep', 'absent'):
+            continue
+        try:
+            if action == 'archive':
+                slot = archive_slot(archive_root, tree.path, home)
+                item['archive'] = str(slot)
+                item['archived'] = archive_tree(tree, slot, label, home)
+            remove_tree(tree, force=action == 'archive')
+            item['outcome'] = 'archived and removed' if action == 'archive' else 'removed'
+        except (OSError, subprocess.SubprocessError, TeardownError, ValueError) as error:
+            item['outcome'] = 'kept'
+            item['error'] = str(error)
+            report['errors'].append(f'{tree.path}: {error}')
+    return report
+
+
+# ---------- main ----------
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog='loop-teardown', description=__doc__.split('\n')[0])
+    sub = parser.add_subparsers(dest='mode', required=True)
+    for name in ('closeout', 'reap'):
+        p = sub.add_parser(name)
+        p.add_argument('--apply', action='store_true', help='act; without it nothing changes')
+        p.add_argument('--archive-dir', help='archive root (default ~/backups/loop-teardown-<UTC>)')
+        p.add_argument('--log-mb', type=int, default=50, help='compress log-like files over this size')
+        p.add_argument('--json', action='store_true', help='print the full report as JSON')
+        p.add_argument('--stale-hours', type=float, default=72.0,
+                       help='reap: a run that never closed out must be idle this long')
+    closeout = sub.choices['closeout']
+    closeout.add_argument('--run-dir', action='append', required=True,
+                          help='codex/loop<N>, then any further run dir (loop-pi: $LOOP_PI_RUN_DIR)')
+    closeout.add_argument('--repo', help='the repository, when no run dir is codex/loop<N>')
+    sub.choices['reap'].add_argument('--repo', action='append', required=True, help='repository checkout')
+    args = parser.parse_args(argv)
+
+    home = real(Path.home())
+    now = utc_now()
+    label = 'loop-teardown-' + now.strftime('%Y%m%dT%H%M%SZ')
+    archive_root = Path(args.archive_dir) if args.archive_dir else home / 'backups' / label
+    repos = ([args.repo] if args.repo else []) if args.mode == 'closeout' else args.repo
+    for d in (args.run_dir if args.mode == 'closeout' else []) + repos:
+        if not Path(d).is_absolute() or not Path(d).is_dir():
+            parser.error(f'not an absolute existing directory: {d}')
+    for repo in repos:
+        if out('rev-parse', '--git-common-dir', cwd=repo) is None:
+            parser.error(f'not a git repository: {repo}')
+    table = process_table()
+    reports = []
+
+    def one(run, mode):
+        try:
+            return teardown(run, mode, args, table, label, home, archive_root)
+        except TeardownError as error:
+            return {'run_dirs': [str(d) for d in run.run_dirs], 'repo': str(run.repo) if run.repo else None,
+                    'loop': run.number, 'worktrees': [], 'caches': [], 'logs': [], 'prunable': [],
+                    'errors': [f'{error}; nothing in this run touched']}
+
+    if args.mode == 'closeout':
+        run = Run(args.run_dir, repo=args.repo)
+        if not run.repo:
+            parser.error('no run dir is codex/loop<N>; pass --repo')
+        reports.append((run, one(run, 'closeout')))
+    else:
+        repos = [real(r) for r in args.repo]
+        for run in reap_runs(repos, home):
+            reports.append((run, one(run, 'reap')))
+        for repo in repos:
+            reports.append((None, claude_isolation(repo, args, table, home, label, archive_root)))
+    failed = False
+    prose = sys.stderr if args.json else sys.stdout
+    for run, report in reports:
+        if not args.json:
+            print_report(report, args.apply)
+        if args.apply and run is not None and not report.get('fenced'):
+            report['receipt'] = str(write_receipt(run, report, args.mode, label, archive_root))
+            print(f'  receipt {report["receipt"]}', file=prose)
+        failed = failed or bool(report['errors'])
+    if args.json:
+        print(json.dumps([r for _, r in reports], indent=1, sort_keys=True))
+    if not args.apply:
+        print('dry run: nothing changed; pass --apply to act', file=prose)
+    return 1 if failed else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

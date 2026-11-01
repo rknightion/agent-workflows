@@ -99,8 +99,9 @@ repair round, an exact retry, a small harness or tooling fix, a lane dsreview di
    The charter digest comes from the state log's `open` event; never type one. A FETCHED tag is
    not a violation. Report a nonzero result under `## Notes`, naming each flagged move the charter
    authorised.
-   Remove no lane tree yourself: list them under `## Notes` and ask the owner to run
-   `/loop-closeout`, which you cannot call.
+   Then run the contract's teardown (section 12, step 3) with both run dirs. It leaves the lane
+   trees loop-pi allocated: list them under `## Notes` and ask the owner to run `/loop-closeout`,
+   which you cannot call.
 4. Write the closeout file, then reply (section 12, step 5).
 
 ## Turn endings

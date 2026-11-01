@@ -3,7 +3,8 @@
 Read by the `loop` skill only. Preparing a run should take minutes, not an hour.
 
 1. **Last run.** Read the last closeout's `## Parked` and `## For ratification`; apply the owner's
-   answers as charter decisions.
+   answers as charter decisions. Run `<plugin root>/bin/loop-teardown reap --repo <abs repo>`
+   (a dry run) and put anything it would remove in the owner prompt.
 2. **Pick the number.** N is one more than the highest `loop<N>` in this repository's `codex/`.
 3. **Read the board.** `backlog task list --plain` and the owner's stated aim. Rank ready work by the
    owner's priorities. Exclude tasks that need an owner choice nobody has made, and say which.
