@@ -37,7 +37,7 @@ still compare its current candidate with the evidence. Existing Git clean filter
 candidate bytes as they do an ordinary commit.
 
 The exclusive output path has an adjacent `.artifacts` directory containing `snapshot/`,
-`base-snapshot/`, their manifests, `candidate.patch` and `brief.txt`. Both complete trees are retained
+`base-snapshot/`, their manifests, `candidate.patch`, `files.json` and `brief.txt`. Both complete trees are retained
 as read-only regular files. Their file hashes/modes/blob IDs and the patch/brief hashes bind the
 reviewed identity. The directory is private; a same-user process can still modify filesystem
 artifacts, so consumers must recompute hashes before trusting them. Evidence inside the source
@@ -47,6 +47,24 @@ Version 1 refuses all symlinks (including safe internal ones), gitlinks/submodul
 changed files, unsupported changed-path quoting, trees over 64 MiB each, patches over
 1.5 MB, and briefs over 100 KB. It never drops these paths to obtain a passing result. Unchanged binary assets are retained byte-for-byte in both local snapshots and manifests; they
 are never silently excluded.
+
+Ordinary ASCII spaces in changed filenames are supported, including Backlog task filenames.
+Patches disable Git color and relative paths, use explicit `a/` and `b/` prefixes, and disable rename detection: a rename is submitted
+as deletion plus addition, matching the changed-path count. Leading/trailing spaces in path
+components, ` b/`, `diff --git`, quotes, backslashes, control characters and non-ASCII changed
+names remain refused because the raw-diff parser cannot reliably preserve those identities.
+The request uses supported `config.files` entries with explicit path/status and a per-file Git
+diff, alongside the unchanged aggregate diff. Each required `content` string is empty: no extra
+source is uploaded. Concatenated per-file patches must equal the aggregate patch byte for byte,
+and `files.json` has its own evidence hash. Each per-file extraction explicitly excludes
+descendants of that path, preserving file/directory replacements without duplicating child patches.
+Committed ranges support both directions; working file-to-directory replacements retain the
+existing refusal against recursive staging. This avoids the vendor raw parser splitting ordinary
+source text containing `diff --git`. The adapter also enforces the DTO limits of 500 files,
+500 characters per path and a conservative 500,000 UTF-8 bytes per file patch.
+This grammar and structured converter were exercised against the upstream CLI converter at
+`kodustech/kodus-ai@2ee5d3257d900944b792a00cf63e60c2ae8fa9fa`; it does not prove the hosted
+service runs that exact revision. No file is omitted to make a candidate reviewable.
 
 Schema version 1 records `candidate` with repository, base/head/tree, changed paths, snapshot/base
 manifest hashes and paths, patch hash/path and brief hash/path. `kodus` contains its component

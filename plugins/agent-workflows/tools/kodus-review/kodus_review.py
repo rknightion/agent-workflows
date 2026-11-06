@@ -121,27 +121,60 @@ def snapshot_tree(repo, tree, destination):
 
 def capture(repo, base, head, directory, brief):
     tree = git(repo, 'rev-parse', head + '^{tree}').decode().strip() if head else worktree_tree(repo)
-    patch = git(repo, 'diff', '--no-ext-diff', '--no-textconv', '--binary', base, tree, '--')
+    patch = git(repo, 'diff', '--no-color', '--no-relative', '--no-ext-diff', '--no-textconv', '--binary',
+                '--no-renames', '--src-prefix=a/', '--dst-prefix=b/', '--line-prefix=',
+                base, tree, '--')
     if not patch:
         raise Refusal('No candidate changes; no review verdict')
-    if len(patch) > MAX_PATCH_BYTES or b'GIT binary patch' in patch or b'Binary files ' in patch:
+    # Binary markers are Git header lines, never prefixed unified-hunk content.
+    if len(patch) > MAX_PATCH_BYTES or re.search(
+            rb'^(?:GIT binary patch|Binary files [^\n]* differ)$', patch, re.MULTILINE):
         raise Refusal('Binary or oversized patch is unsupported')
     patch.decode('utf-8', errors='strict')
     changed = git(repo, 'diff', '--name-only', '--no-renames', '-z', base, tree, '--').split(b'\0')
     changed = [p.decode('utf-8') for p in changed if p]
-    # The vendor raw-diff parser does not establish quoted/escaped-path support.
-    if any(not re.fullmatch(r'[A-Za-z0-9_./@+-]+', p) for p in changed):
+    # Pinned vendor parser accepts ordinary spaces, but trims names, splits at
+    # 'diff --git', and uses a greedy ' b/' delimiter for deleted paths. Keep
+    # these ambiguous forms and all quoted/escaped names outside the grammar.
+    if any(not re.fullmatch(r'[A-Za-z0-9_./@+ -]+', p)
+           or any(part != part.strip() for part in p.split('/'))
+           or ' b/' in p or 'diff --git' in p for p in changed):
         raise Refusal('Changed path is outside the supported raw-diff grammar')
+    statuses = git(repo, 'diff', '--name-status', '--no-renames', '-z', base, tree, '--').split(b'\0')
+    pairs = list(zip(statuses[0:-1:2], statuses[1:-1:2]))
+    if len(pairs) != len(changed) or [p.decode('utf-8') for _, p in pairs] != changed or len(pairs) > 500:
+        raise Refusal('Structured file inventory differs from candidate paths or exceeds API limit')
+    files = []
+    for status, raw_path in pairs:
+        name = raw_path.decode('utf-8')
+        kind = {b'A': 'added', b'M': 'modified', b'D': 'deleted'}.get(status)
+        if not kind or len(name) > 500:
+            raise Refusal('Unsupported structured file status or path length')
+        # Even a literal Git pathspec includes descendants when a file becomes a
+        # directory (or vice versa). Exclude that subtree explicitly. The grammar
+        # above admits no glob metacharacters, so only the appended /** is a glob.
+        file_patch = git(repo, 'diff', '--no-color', '--no-relative', '--no-ext-diff', '--no-textconv',
+                         '--binary', '--no-renames', '--src-prefix=a/', '--dst-prefix=b/',
+                         '--line-prefix=', base, tree, '--', ':(top,literal)' + name,
+                         ':(top,exclude,glob)' + name + '/**').decode('utf-8')
+        if not file_patch or len(file_patch.encode('utf-8')) > 500000:
+            raise Refusal('Empty or oversized structured file patch')
+        # content is required by the DTO; empty sends no source beyond the existing diff.
+        files.append({'path': name, 'status': kind, 'diff': file_patch, 'content': ''})
+    if ''.join(f['diff'] for f in files).encode('utf-8') != patch:
+        raise Refusal('Structured patches do not exactly cover the aggregate candidate patch')
+    files_bytes = encoded(files)
     snapshot = directory/'snapshot'; base_snapshot = directory/'base-snapshot'
     manifest_bytes = snapshot_tree(repo, tree, snapshot)
     base_manifest = snapshot_tree(repo, base, base_snapshot)
     for name,data in [('manifest.json',manifest_bytes),('base-manifest.json',base_manifest),
-                      ('candidate.patch',patch),('brief.txt',brief)]:
+                      ('candidate.patch',patch),('brief.txt',brief),('files.json',files_bytes)]:
         path=directory/name;path.write_bytes(data);path.chmod(0o444)
     if not head and worktree_tree(repo) != tree:
         raise Refusal('Working candidate changed during capture')
     return {'base':base, 'head':head, 'tree':tree, 'patch_sha256':digest(patch),
-            'brief_sha256':digest(brief), 'snapshot_manifest_sha256':digest(manifest_bytes),
+            'brief_sha256':digest(brief), 'files_sha256':digest(files_bytes),
+            'files_path':str(directory/'files.json'), 'snapshot_manifest_sha256':digest(manifest_bytes),
             'base_manifest_sha256':digest(base_manifest), 'changed_paths':changed,
             'snapshot_path':str(snapshot), 'base_snapshot_path':str(base_snapshot),
             'manifest_path':str(directory/'manifest.json'),
@@ -202,7 +235,13 @@ def review(candidate, patch, audit, persist):
             raise Refusal('Malformed API data envelope')
         return value
     # The service rejects config.focus; intent is retained only for the independent local agent.
-    body=encoded({'diff':patch.decode(), 'config':{}, 'gitRemote':'https://github.com/'+candidate['repository']+'.git',
+    files_bytes=Path(candidate['files_path']).read_bytes()
+    if digest(files_bytes) != candidate['files_sha256']:
+        raise Refusal('Structured file artifact changed before submission')
+    files=json.loads(files_bytes)
+    if ''.join(f['diff'] for f in files).encode('utf-8') != patch:
+        raise Refusal('Structured request differs from captured aggregate patch')
+    body=encoded({'diff':patch.decode(), 'config':{'files':files}, 'gitRemote':'https://github.com/'+candidate['repository']+'.git',
                   'mergeBaseSha':candidate['base'], 'commitSha':candidate['head'] or candidate['base'],
                   'cliVersion':'kodus-review/'+VERSION})
     queued=request('/cli/review', body)

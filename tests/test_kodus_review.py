@@ -90,6 +90,64 @@ class ReviewCLI(unittest.TestCase):
         self.assertNotIn('kodus_test_fixture',json.dumps(e))
         self.assertEqual(Path(e['evidence_path']).stat().st_mode & 0o777,0o400)
 
+    def test_space_paths_and_renames_keep_exact_candidate_and_index(self):
+        folder=self.repo/'backlog/tasks';folder.mkdir(parents=True)
+        for name in ('modify task.md','delete task.md','rename old.md'):
+            (folder/name).write_text('original\n')
+        self.git('add','--','backlog')
+        self.git('-c','commit.gpgsign=false','commit','-qm','space names')
+        self.base=self.git('rev-parse','HEAD').strip()
+        (folder/'modify task.md').write_text('staged\n')
+        self.git('add','--','backlog/tasks/modify task.md')
+        (folder/'modify task.md').write_text('final\n')
+        (folder/'delete task.md').unlink()
+        (folder/'rename old.md').rename(folder/'rename new.md')
+        (folder/'add task.md').write_text('added\n')
+        # Host preferences must not alter parser prefixes or collapse a rename pair.
+        self.git('config','diff.renames','true');self.git('config','diff.noprefix','true')
+        self.git('config','color.diff','always');self.git('config','diff.relative','true')
+        before=(self.repo/'.git/index').read_bytes()
+        self.response['filesAnalyzed']=5
+        run,e=self.run_review()
+        self.assertEqual(run.returncode,0,run.stderr)
+        self.assertEqual((self.repo/'.git/index').read_bytes(),before)
+        candidate=e['candidate']
+        expected=['backlog/tasks/'+n for n in ('add task.md','delete task.md','modify task.md','rename new.md','rename old.md')]
+        self.assertEqual(candidate['changed_paths'],expected)
+        self.assertEqual(candidate['base'],self.base)
+        patch=Path(candidate['patch_path']).read_bytes()
+        self.assertEqual(hashlib.sha256(patch).hexdigest(),candidate['patch_sha256'])
+        self.assertEqual(patch.decode(),self.calls[0][2]['diff'])
+        self.assertEqual(patch.decode().count('diff --git '),5)
+        self.assertNotIn(b'\x1b[',patch)
+        files=self.calls[0][2]['config']['files']
+        self.assertEqual([f['path'] for f in files],expected)
+        self.assertEqual(''.join(f['diff'] for f in files),patch.decode())
+        self.assertTrue(all('\x1b[' not in f['diff'] for f in files))
+        self.assertNotIn('rename from',patch.decode())
+        snapshot=Path(candidate['snapshot_path'])
+        self.assertEqual((snapshot/'backlog/tasks/modify task.md').read_text(),'final\n')
+        self.assertEqual((Path(candidate['base_snapshot_path'])/'backlog/tasks/modify task.md').read_text(),'original\n')
+        self.assertFalse((snapshot/'backlog/tasks/rename old.md').exists())
+        # Reconstruct the final tree independently using a separate real Git index.
+        env={**self.env,'GIT_INDEX_FILE':str(self.root/'expected-index')}
+        for args in [('read-tree',self.base),('add','--all','--','.'),('write-tree',)]:
+            result=subprocess.check_output(['git','-C',str(self.repo),*args],env=env,text=True)
+        self.assertEqual(candidate['tree'],result.strip())
+
+    def test_ambiguous_changed_paths_are_refused_without_submission(self):
+        for name in ('trailing ', ' leading.md', 'a b/name.md', 'diff --git.md',
+                     'quote".md', 'tab\t.md', 'unicode-é.md', 'back\\slash.md'):
+            with self.subTest(name=name):
+                path=self.repo/name;path.parent.mkdir(parents=True,exist_ok=True)
+                path.write_text('unsupported\n')
+                before=(self.repo/'.git/index').read_bytes()
+                run,e=self.run_review()
+                self.assertEqual(run.returncode,2,run.stderr)
+                self.assertEqual(self.calls,[])
+                self.assertEqual((self.repo/'.git/index').read_bytes(),before)
+                path.unlink()
+
     def test_explicit_staged_ignored_file_is_included_without_ignored_untracked_siblings(self):
         (self.repo/'.gitignore').write_text('codex/\n')
         self.git('add','--','.gitignore');self.git('-c','commit.gpgsign=false','commit','-qm','ignore')
@@ -121,6 +179,84 @@ class ReviewCLI(unittest.TestCase):
         self.assertEqual(run.returncode,2,run.stderr)
         self.assertEqual(self.calls,[])
         self.assertEqual((self.repo/'.git/index').read_bytes(),before)
+
+    def test_file_directory_replacements_keep_exact_per_file_patches(self):
+        parent=self.repo/'foo'
+        parent.write_text('diff --git a/literal b/literal\nfile payload\n')
+        self.git('add','--','foo');self.git('-c','commit.gpgsign=false','commit','-qm','file')
+        file_head=self.git('rev-parse','HEAD').strip()
+        parent.rename(self.root/'retained-file')
+        parent.mkdir();(parent/'bar').write_text('diff --git a/other b/other\nchild payload\n')
+        self.git('add','--all','--','foo');self.git('-c','commit.gpgsign=false','commit','-qm','directory')
+        directory_head=self.git('rev-parse','HEAD').strip()
+        self.response['filesAnalyzed']=2
+        for label,base,head in [('file-to-directory',file_head,directory_head),
+                                ('directory-to-file',directory_head,file_head),
+                                ('working-directory-to-file',directory_head,None)]:
+            with self.subTest(direction=label):
+                if head is None:
+                    (parent/'bar').rename(self.root/'retained-child');parent.rmdir()
+                    parent.write_text('diff --git a/final b/final\nfinal payload\n')
+                self.base=base;before=(self.repo/'.git/index').read_bytes();call_index=len(self.calls)
+                run,e=self.run_review({},*(['--head',head] if head else []))
+                self.assertEqual(run.returncode,0,run.stderr)
+                self.assertEqual((self.repo/'.git/index').read_bytes(),before)
+                files=self.calls[call_index][2]['config']['files']
+                self.assertEqual([f['path'] for f in files],['foo','foo/bar'])
+                self.assertEqual([f['status'] for f in files],
+                                 ['deleted','added'] if label=='file-to-directory' else ['added','deleted'])
+                self.assertEqual(''.join(f['diff'] for f in files),self.calls[call_index][2]['diff'])
+                self.assertEqual(files[0]['diff'].splitlines()[0],'diff --git a/foo b/foo')
+                self.assertEqual(files[1]['diff'].splitlines()[0],'diff --git a/foo/bar b/foo/bar')
+                self.assertNotIn('diff --git a/foo/bar b/foo/bar',files[0]['diff'])
+                self.assertIn('diff --git a/',files[0]['diff'].split('@@')[-1])
+                self.assertIn('diff --git a/',files[1]['diff'].split('@@')[-1])
+                self.assertEqual(e['candidate']['base'],base)
+                if head:
+                    self.assertEqual(e['candidate']['tree'],self.git('rev-parse',head+'^{tree}').strip())
+
+    def test_structured_files_preserve_literal_diff_markers_and_full_patch(self):
+        (self.repo/'a.py').write_text('before\ndiff --git quoted documentation\nafter\n')
+        self.git('add','--','a.py');self.git('-c','commit.gpgsign=false','commit','-qm','markers')
+        self.base=self.git('rev-parse','HEAD').strip()
+        (self.repo/'a.py').write_text('changed\ndiff --git quoted documentation\nafter\nmore diff --git literal\n')
+        (self.repo/'new task.md').write_text('new diff --git literal\nlast line\n')
+        self.response['filesAnalyzed']=2
+        before=(self.repo/'.git/index').read_bytes()
+        run,e=self.run_review();self.assertEqual(run.returncode,0,run.stderr)
+        self.assertEqual((self.repo/'.git/index').read_bytes(),before)
+        body=self.calls[0][2];files=body['config'].get('files')
+        self.assertIsInstance(files,list)
+        self.assertEqual([f['path'] for f in files],['a.py','new task.md'])
+        self.assertEqual([f['status'] for f in files],['modified','added'])
+        self.assertTrue(all(f['content']=='' for f in files))
+        self.assertEqual(''.join(f['diff'] for f in files),body['diff'])
+        for f in files:
+            expected=self.git('--literal-pathspecs','diff','--no-ext-diff','--no-textconv','--binary',
+                              '--no-renames','--src-prefix=a/','--dst-prefix=b/','--line-prefix=',
+                              self.base,e['candidate']['tree'],'--',f['path'])
+            self.assertEqual(f['diff'],expected)
+        stored=Path(e['candidate']['files_path']).read_bytes()
+        self.assertEqual(json.loads(stored),files)
+        self.assertEqual(hashlib.sha256(stored).hexdigest(),e['candidate']['files_sha256'])
+
+    def test_textual_binary_header_literals_are_not_binary_patches(self):
+        path=self.repo/'a.py'
+        path.write_text('GIT binary patch\nBinary files old and new differ\nold text\n')
+        self.git('add','--','a.py')
+        self.git('-c','commit.gpgsign=false','commit','-qm','textual markers')
+        self.base=self.git('rev-parse','HEAD').strip()
+        path.write_text('GIT binary patch\nnew text\nBinary files a and b differ\n')
+        before=(self.repo/'.git/index').read_bytes()
+        run,e=self.run_review()
+        self.assertEqual(run.returncode,0,run.stderr)
+        self.assertEqual((self.repo/'.git/index').read_bytes(),before)
+        patch=self.calls[0][2]['diff']
+        self.assertIn(' GIT binary patch\n',patch)
+        self.assertIn('-Binary files old and new differ\n',patch)
+        self.assertIn('+Binary files a and b differ\n',patch)
+        self.assertEqual(Path(e['candidate']['patch_path']).read_text(),patch)
+        self.assertEqual(hashlib.sha256(patch.encode()).hexdigest(),e['candidate']['patch_sha256'])
 
     def test_unchanged_binary_context_is_retained_but_changed_binary_is_refused(self):
         binary=b'\x89PNG\x00\xfffixture'
