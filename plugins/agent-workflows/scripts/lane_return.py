@@ -27,7 +27,7 @@ MAX_RETURN_UNITS = 1800
 MAX_MESSAGE_CHARS = 65536
 MAX_JSON_DEPTH = 32
 REQUIRED = {"v", "lane", "task", "status", "base", "worktree", "check", "exit", "tail",
-            "coderabbit", "dsreview", "questions"}
+            "questions"}
 
 
 def unique_object(pairs):
@@ -39,14 +39,11 @@ def unique_object(pairs):
     return result
 
 
-def review_ok(value, kind):
+def review_ok(value):
     if value is None:
         return True
     if not isinstance(value, dict):
         return False
-    if kind == "coderabbit":
-        return (type(value.get("ran")) is bool
-                and all(type(value.get(k)) is int and value[k] >= 0 for k in ("major", "unreviewed")))
     return (value.get("verdict") in ("PASS", "FAIL", "none")
             and all(type(value.get(k)) is int and value[k] >= 0 for k in ("major", "fixed", "disputed")))
 
@@ -116,9 +113,18 @@ def return_error(payload, role):
         return "status complete conflicts with nonzero check exit " + str(value["exit"])
     if not isinstance(value["questions"], list) or not all(isinstance(q, str) for q in value["questions"]):
         return "questions must be an array of strings"
-    for key in ("coderabbit", "dsreview"):
-        if not review_ok(value[key], key):
-            return "invalid " + key + " review fields"
+    review_keys = {"review", "dsreview"} & value.keys()
+    if len(review_keys) != 1:
+        return "supply exactly one of review or legacy dsreview"
+    review_key = next(iter(review_keys))
+    review = value[review_key]
+    if not review_ok(review):
+        return "invalid " + review_key + " review fields"
+    if review_key == "review" and review is not None:
+        if not isinstance(review.get("provider"), str) or not review["provider"].strip():
+            return "review provider must name the frozen route"
+        if not isinstance(review.get("evidence"), str) or not Path(review["evidence"]).is_absolute():
+            return "review evidence must be an absolute artifact path"
     if "sha" in value:
         if role not in ("senior", "senior-escalation"):
             return "sha handbacks are only for senior compose/board lanes"

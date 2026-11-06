@@ -28,7 +28,6 @@ at most a few prose lines. Full logs, findings and questions go in `return.md`.
 {"v":3,"lane":"<id>","task":"<ID>","status":"complete|partial|blocked|failed",
  "base":"<full SHA>","worktree":"<abs path>","patch":"<abs path>","patch_sha256":"<hex>",
  "check":"<exact command>","exit":<int>|null,"tail":"<last lines, at most 40>",
- "coderabbit":{"ran":true|false,"major":<n>,"unreviewed":<n>}|null,
- "dsreview":{"verdict":"PASS|FAIL|none","major":<n>,"fixed":<n>,"disputed":<n>}|null,
+ "review":{"provider":"<frozen route>","evidence":"<abs artifact>","verdict":"PASS|FAIL|none","major":<n>,"fixed":<n>,"disputed":<n>}|null,
  "questions":["<short; details in return.md>"]}
 ```

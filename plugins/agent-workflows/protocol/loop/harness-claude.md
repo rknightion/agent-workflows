@@ -30,8 +30,8 @@ The launch file's first line is the command; the message follows it:
   therefore repeats each charter `authority:` and `live:` line that touches customer data or a live
   system, verbatim, after `Standing:`. Paste the message text, not a bare launch-file path, when it
   carries such lines.
-- `AskUserQuestion` blocks the session: call it only as contract section 7 allows, never in
-  overnight mode, and reconcile (section 12) as soon as it returns.
+- Never call `AskUserQuestion`: it blocks the session (contract section 7). While the owner is
+  present, ask in a message that also makes a tool call and append the question to `QUESTIONS.md`.
 
 ## Routes
 

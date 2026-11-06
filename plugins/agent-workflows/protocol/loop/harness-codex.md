@@ -46,7 +46,7 @@ Codex session and does not change that session's model or reasoning effort.
 - Your default leans to asking and parking; correct for it. Before any owner question or `owner`
   park, apply cite or decide (contract section 9): name the clause that reserves the call, or rule
   it for ratification and continue. Never ask permission for a call section 9 lists as yours:
-  another repair round, an exact retry, a small harness or tooling fix, a lane dsreview dispute with
+  another repair round, an exact retry, a small harness or tooling fix, a lane local-review dispute with
   evidence (never a `pr`-mode one).
 - Never conclude dispatch is unavailable without a recorded `spawn_agent` error. A thread-pool
   limit means wait for a return, then retry.

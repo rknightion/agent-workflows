@@ -34,7 +34,7 @@ class LaneReturnHook(unittest.TestCase):
             "base": "a" * 40, "worktree": self.tmp.name,
             "patch": str(self.patch), "patch_sha256": hashlib.sha256(self.patch.read_bytes()).hexdigest(),
             "check": "python3 -m unittest", "exit": 0, "tail": "OK",
-            "coderabbit": None, "dsreview": None, "questions": [],
+            "dsreview": None, "questions": [],
         }
 
     def registered_command(self):
@@ -103,9 +103,25 @@ class LaneReturnHook(unittest.TestCase):
         self.assertEqual(self.stop({**committed, "sha": "b" * 40}, "senior"), {})
         crlf = "```lane-return\r\n" + json.dumps(self.good) + "\r\n```\r\nDone.\r\n"
         self.assertEqual(self.stop(crlf), {})
+        self.assertEqual(self.stop({**self.good, "coderabbit": None}), {})  # a run prepared before the field left
+
+    def test_named_review_record_and_legacy_form_are_both_validated(self):
+        candidate = {k: v for k, v in self.good.items() if k != "dsreview"}
+        review = {"provider": "kodus+local-agent", "verdict": "PASS", "major": 0,
+                  "fixed": 0, "disputed": 0, "evidence": str(Path(self.tmp.name) / "review.json")}
+        self.assertEqual(self.stop({**candidate, "review": review}), {})
+        self.assertEqual(self.stop({**candidate, "review": None}), {})
+        self.assertBlocked(self.stop(candidate), "exactly one")
+        self.assertBlocked(self.stop({**self.good, "review": review}), "exactly one")
+        for change in ({"provider": ""}, {"evidence": "relative.json"}, {"major": True},
+                       {"verdict": "SKIPPED"}, {"fixed": -1}, {"disputed": None}):
+            with self.subTest(change=change):
+                self.assertBlocked(self.stop({**candidate, "review": {**review, **change}}), "review")
+        for bad in ({"verdict": "PASS", "major": True, "fixed": 0, "disputed": 0}, {}):
+            self.assertBlocked(self.stop({**self.good, "dsreview": bad}), "dsreview")
 
     def test_wrong_types_duplicate_keys_and_ambiguous_blocks_are_not_returns(self):
-        for change in ({"exit": False}, {"v": True}, {"questions": "none"}, {"coderabbit": {}},
+        for change in ({"exit": False}, {"v": True}, {"questions": "none"}, {"dsreview": {}},
                        {"patch_sha256": None}, {"status": "done"}):
             with self.subTest(change=change):
                 self.assertBlocked(self.stop({**self.good, **change}), "lane return")
@@ -120,7 +136,7 @@ class LaneReturnHook(unittest.TestCase):
             with self.subTest(length=len(contents)):
                 self.assertBlocked(self.stop("```lane-return\n" + contents + "\n```"), reason)
         self.assertEqual(self.stop({**self.good, "tail": "[" * 100 + '"\\\\'}), {})
-        unicode_return = json.dumps({**self.good, "tail": "\U0001f600" * 700}, ensure_ascii=False)
+        unicode_return = json.dumps({**self.good, "tail": "\U0001f600" * 750}, ensure_ascii=False)
         self.assertBlocked(self.stop("```lane-return\n" + unicode_return + "\n```"), "size")
 
     def test_decode_and_envelope_failures_use_blocking_exit_two(self):

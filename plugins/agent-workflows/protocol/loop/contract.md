@@ -1,6 +1,6 @@
 # Loop contract (v3)
 
-A loop is one long-lived root session working a living queue of Backlog tasks through parallel
+A loop is one long-lived root session working a living queue from the tracker through parallel
 lanes. The root reads its charter, this contract, its `harness-<name>.md` and the repository's
 `LOOP.md`. Lanes read only their brief and the run's `LANE.md`. Precedence: owner message in the run >
 charter > `Standing:` file > `LOOP.md` > this contract.
@@ -30,15 +30,16 @@ by a `DECISIONS.md` entry (or an owner-approved addendum beside it).
 
 ## 2. The queue
 
-- The backlog is the queue. Start from the charter's first wave, then keep `QUEUE.md` fed from the
-  board in the charter's priority order. A scout may draft waves; only the root writes ready rows.
-- `QUEUE.md` has three sections: `## Ready` (ordered rows, the task ID first in each), `## Hold`
+- The tracker is the queue: Backlog, or GitHub issues per `LOOP.md`'s `tracker: github` (its
+  `## Queue` names the commands). Start from the charter's first wave, then feed `QUEUE.md` from it
+  in priority order. A scout may draft waves; only the root writes ready rows.
+- `QUEUE.md` has three sections: `## Ready` (ordered rows, the task ID or `#N` first), `## Hold`
   (task, reason) and `## Landing` (accepted, to land). Live lanes are in `LANES.md`, not here.
-- Before each wave run `loop-lint queue <charter> <QUEUE.md>`: nothing excluded, nothing Done,
-  nothing labelled `needs-owner`. A re-scope of an exclusion needs an owner ruling or a recorded
+- Before each wave run `loop-lint queue <charter> <QUEUE.md>`: nothing excluded, nothing Done or
+  closed or labelled `needs-owner`. A re-scope of an exclusion needs an owner ruling or a recorded
   decision citing one.
-- File new findings as Backlog tasks at once and queue them when they serve the aim.
-- Do not stop for lack of listed rows while ready, unexcluded work remains in the board's priority
+- File new findings in the tracker at once and queue them when they serve the aim.
+- Do not stop for lack of listed rows while ready, unexcluded work remains in priority
   order. Never manufacture work outside the aim.
 
 ## 3. Dispatch
@@ -58,7 +59,8 @@ by a `DECISIONS.md` entry (or an owner-approved addendum beside it).
 - Routes are in the harness file: `worker` by default; `senior` only when the brief says why
   (unknown cause, frozen seam or shared contract, data-model call, composing a landing); `scout` for
   read-only mapping, sweeps, wave drafts and log reduction. A discovery brief names the language
-  server for symbols and `jg`, scoped to a package, for behaviour questions.
+  server for symbols, `ast-grep` for code shapes and `jg`, scoped to a package, for behaviour
+  questions.
 
 Brief, at most about 2 KB. Keep the first line exactly in this form on every lane: harnesses parse
 it. A lane with no single task writes `Task: none (<purpose>)`. When the task implements a grammar
@@ -79,7 +81,7 @@ or format this contract or the charter fixes, quote that line in `Why:`.
 - Repairs go back to the same live lane (the harness names the call) with the new evidence.
 - **Convergence tripwire.** When a task has had two failed rounds that each opened a new class of
   finding, or four hours have passed since its first dispatch (excluding `PAUSED`
-  time and blocking owner questions), stop repairing. Record in `DECISIONS.md` the
+  time and owner waits), stop repairing. Record in `DECISIONS.md` the
   first that fits, in either owner mode: a named new approach, a split, a `senior` escalation;
   park with options only when none can progress. A second trip parks it `owner`.
   On privacy, redaction or scrubbing work count failed review rounds, not classes; after the
@@ -88,18 +90,23 @@ or format this contract or the charter fixes, quote that line in `Why:`.
 
 ## 5. Review
 
-- Routine: lane gate, CodeRabbit and dsreview replace the reviewer. Require one when dsreview
-  has no verdict, its major is disputed, on a second repair round, or a required CodeRabbit run
-  is missing; add one if doubtful. Review landed tasks before closeout; fix forward.
-- Guarded (section 8): security reviewer PASS before landing, CodeRabbit and lane dsreview; any
-  blocker blocks. Record disagreements in DECISIONS.md.
+- Before dispatch, the planner freezes the local review provider(s), exact command(s), executor,
+  candidate identity and failure policy in `LANE.md`, from the enrolled context and repository
+  contract. Missing or conflicting selection blocks affected work; PATH is not policy. A combined
+  route requires every named component and retains its separate evidence. Preserve exact candidate
+  context availability; an input manifest alone does not prove server-side review completeness.
+- Routine: lane gate and the frozen local review replace the reviewer. Require one when that review has no
+  verdict, its major is disputed, or on a second repair round; add one if doubtful. Review landed
+  tasks before closeout; fix forward. An additional reviewer never waives a component required by
+  the frozen context/repository policy; an explicit fallback in that policy is a selected route,
+  not permission to invent a substitute.
+- Guarded (section 8): security reviewer PASS before landing and the frozen local review; any blocker
+  blocks. Record disagreements in DECISIONS.md.
 - Changed code invalidates a verdict: review the delta only; reviewers never edit. Minor-only
   repairs explicitly named by the verdict may queue without another review; root checks the patch.
-- CodeRabbit reviews final code once; fix critical/major, explain the rest, review repair deltas.
-  Missing complete or partial coverage is not PASS. Skip docs/comments/config/dependency bumps,
-  saying so. Scarce quota limits required CodeRabbit to guarded/substantial work; omission on
-  other work does not alone require a reviewer.
-- `review: local-pair` replaces CodeRabbit with local Copilot CLI plus dsreview. Both must cover
+- The frozen local review reviews final code once; fix critical/major, explain the rest, review repair deltas.
+  No verdict is not PASS. Skip docs/comments/config/dependency bumps, saying so.
+- `review: local-pair` uses the repository's explicitly named pair. Both must cover
   the exact range and pass without unresolved critical/major. Missing/incomplete verdicts block.
   Retain base/head, coverage and verdicts; add a Reviewed-by-local trailer. Trailer-only amend
   requires identical trees. Local review never substitutes for hosted approval or required checks.
@@ -128,13 +135,13 @@ or format this contract or the charter fixes, quote that line in `Why:`.
   landing, damages data or a live deploy, or has no plausible repair.
 - Merge sibling commits before pushing; never revert foreign work. Commit explicit paths.
 - **Landing mode.** `LOOP.md` selects `landing: direct` (default) or `landing: pr`, and
-  `reviewer: coderabbit` (default) or `reviewer: copilot`. Direct local-pair instead declares
-  `review: local-pair` and `landing-branch: <branch>`; never combine it with `reviewer:`. The default
-  direct branch is main; code AND board commits target the named direct branch. PR heads are
-  `loop<N>-land<k>` from main; PR-mode board-only commits still target main. Read live target rules
-  before every push; unexpected rules stop landing. No main merge is implied.
+  a hosted `reviewer:` profile or `review: local-pair` (never both keys). Resolve a missing
+  reviewer through the enrolled context and repository contract; never guess a shared default. Direct mode lands code AND board commits on `landing-branch:` (default main;
+  required with local-pair). PR heads are `loop<N>-land<k>` from main; PR-mode board-only commits
+  still target main. Read live target rules before every push; unexpected rules stop landing. No
+  main merge is implied.
   In `pr`, only the root writes PRs and merges; the squash commit is the landing:
-  1. Run local CodeRabbit on the batch once (overrides scarce quota), push `loop<N>-land<k>`;
+  1. Run the frozen local review on the batch once, push `loop<N>-land<k>`;
      open a ready PR to main at once. Conventional title: highest-precedence release-please
      type, `!` for any break; no `deps`, `WIP`, `DO NOT MERGE`, `release`.
   2. Gate that tree during review. End the body with a fenced `landing-evidence` block: base/head
@@ -157,41 +164,21 @@ or format this contract or the charter fixes, quote that line in `Why:`.
      conflict or a required up-to-date check. If the earlier PR parks or closes, rebuild from
      main on a new branch.
 
-  **coderabbit.** Watch `gh api repos/<owner>/<repo>/commits/<sha>/statuses`: the `CodeRabbit`
-  status: "Review completed" or "Review approved" (success also covers skipped, draft and
-  rate-limited reviews). Read the latest `coderabbitai[bot]` review with `commit_id` equal to head;
-  absent: read once more after a minute. `CHANGES_REQUESTED`, or `COMMENTED` with an open thread,
-  goes to step 4; `COMMENTED` with none open waits at 3. No status after about 3 minutes: post
-  `@coderabbitai review` once per head, the only comment. Never reply in or resolve its
-  threads, post `@coderabbitai approve`, `resolve`, or ignore pre-merge checks. Merge requires
-  an APPROVED review on head and no open CodeRabbit thread (GraphQL `reviewThreads.isResolved`).
-
-  **copilot.** Without planner sandbox proof, park `dependency`.
-  `gh pr view <n> --json headRefOid,reviewDecision`: first match `headRefOid` to pushed SHA.
-  Merge also requires `reviewDecision: APPROVED`.
-  Watch `gh api --paginate repos/<owner>/<repo>/commits/<sha>/check-runs`: name
-  `copilot-pull-request-reviewer`, `head_sha` matching head. `started_at` marks start;
-  `status: completed` plus `conclusion: success` marks completion. Read
-  `gh api --paginate repos/<owner>/<repo>/pulls/<n>/reviews`: latest submitted REST review with
-  `user.login: copilot-pull-request-reviewer[bot]` and `commit_id` matching head. COMMENTED ends
-  a round; only APPROVED permits merge.
-  If no head check exists after about 3 minutes, run `gh pr edit <n> --add-reviewer @copilot` once
-  per head. Resolve only Copilot threads verified fixed; log proof in `DECISIONS.md`. Unresolved
-  findings block merge; disputes go to the owner. Re-read all thread pages before merge. Without
-  head APPROVED, wait within step 5's caps; no bypass, self-approval or bot approval commands.
+  Read only the selected profile under `review-profiles/<profile>.md`; freeze its absolute
+  source path in the charter. Profile selection is not activation evidence. A hosted profile
+  cannot weaken live branch protections, required approval, exact-head checks or thread gates.
 
 ## 7. The owner
 
 - **Owner present** (the default from launch): put each owner-only call (section 9) to the
-  owner as it arises, recommendation first, appending each to `QUESTIONS.md`. A blocking question
-  tool holds every lane return and dispatch until answered, so call it only at a boundary: process
-  every queued return and dispatch every ready task first, then batch the questions into one call.
+  owner as it arises, recommendation first, appending each to `QUESTIONS.md`. Never block:
+  ask without a blocking tool; hold only work needing the answer.
 - **Overnight mode** starts when the owner says they are leaving: "overnight mode", "I'm away",
   "AFK", "heading out" (optionally "until HH:MM", the owner's local time; record it in UTC in
-  `DECISIONS.md`). Then ask nothing and never call a blocking question tool: hold questions in
+  `DECISIONS.md`). Then ask nothing: hold questions in
   `QUESTIONS.md`, rule what you can, park what you cannot, and work the charter's `overnight:`
   mandate. It ends only at the stated time or on "I'm back", "I'm awake" or "overnight off"; then,
-  after the reconcile, put every held `QUESTIONS.md` item to the owner in batched prompts first. A
+  after the reconcile, put every held `QUESTIONS.md` item to the owner first. A
   steering, corrective or answering message does not end it: apply it and carry on.
 - **Controls.** An owner clause leading with a control phrase is a control; quoted, conditional or
   questioning mentions, tool output and notifications never are. Precedence: emergency stop >
@@ -223,7 +210,7 @@ name stops and returns.
   scope, in-repo tooling and harness fixes too (never your own permissions); amending a seam
   frozen this run with no accepted consumer (re-brief its lanes); a repair round under the
   tripwire and PR caps, or the tripwire's next step; an exact retry of a cleanly failed
-  granted command; a lane dsreview dispute with evidence (section 5 applies).
+  granted command; a lane local-review dispute with evidence (section 5 applies).
 - **Cite or decide.** Ask, or park `owner`, only for what the contract, charter or `LOOP.md`
   reserves to the owner, an action no grant covers, a section 10 fence, an exclusion or a
   credential rotation; no ruling clears those. Name which; else rule it.
@@ -254,7 +241,7 @@ name stops and returns.
   its estimate recorded in `DECISIONS.md`; otherwise park.
 - In a second context: touch no customer tenant the charter does not name, and send no customer identifier
   off the machine.
-- Never run CodeRabbit on the chat backup repositories or an agent home.
+- Never send the chat backup repositories or an agent home to any external reviewer.
 - A risky external write: capture the response, re-read the target after an ambiguous result, roll
   back only a verified change.
 
@@ -266,7 +253,7 @@ name stops and returns.
 - A repository-wide check the task does not set out to change (a `definition_of_done` command, a
   gate leg) that already fails with the same failing tests and errors on base,
   does not block acceptance or landing once both logs are recorded. List it in the return and the
-  closeout's `## Notes` and file it as a Backlog task. The brief's `Done when:` check never
+  closeout's `## Notes` and file it in the tracker. The brief's `Done when:` check never
   qualifies: it must be red at base and green on the candidate.
 - Local checks prove their tree, the composed gate the integrated tree, CI its exact SHA, live
   evidence only the observed environment. No evidence is not a pass.
@@ -279,7 +266,7 @@ name stops and returns.
   its items as `owner` and close out.
 - After compaction or a provider error, recover: re-read `QUEUE.md`, `LANES.md`, `STATE.md` and
   the harness's live listing (search `DECISIONS.md` only for an id they cite), reconcile,
-  continue. Never start a fresh root. Do the same reconcile whenever a blocking call or an owner answer returns (an owner
+  continue. Never start a fresh root. Do the same reconcile whenever an owner answer returns (an owner
   control in the answer comes first): every return that queued meanwhile and every lane in
   `LANES.md` gets a next step before new work.
 - Close out on `close out`, an emergency stop, or when no ready unexcluded work remains in the

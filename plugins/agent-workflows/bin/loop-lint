@@ -9,7 +9,9 @@ list, any Done task and any task carrying an excluded label. Ready rows are the 
 under a `## Ready` heading, or, with no such heading, every row outside the Hold, Landing and Done
 sections; the first task ID of a row is the row's task. `needs-owner` is always an excluded label. Each ID
 is read with `backlog task view <id> --plain` in the repository that owns the charter (the parent of its
-`codex/` directory, or --repo).
+`codex/` directory, or --repo). When that repository's LOOP.md declares `tracker: github`, a row's item is
+its first `#N` instead, read with `gh issue view N -R <origin owner/repo>`; a closed issue fails as Done
+does, and a ready row naming only a board task ID fails.
 `loopmd` checks a repository's LOOP.md.
 
 Messages are `<rule> <path>:<line> <text>`; an informational line carries `info:` (or `warning:`)
@@ -48,6 +50,8 @@ PLACEHOLDER = re.compile(r'(?<!\S)<[A-Za-z][^<>]*>(?!\S)')
 STANDING_VALUE = re.compile(r'^(/\S+)\s+sha256=([0-9a-f]{64})$')
 BUDGET_VALUE = re.compile(r'^(?:none|\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?Z)$')
 TASK_ID = re.compile(r'(?<![\w-])[A-Z][A-Z0-9]*-\d+(?:\.\d+)*(?![\w-])')
+ISSUE_REF = re.compile(r'(?<![\w/#])#(\d+)(?![\w-])')
+TRACKERS = ('backlog', 'github')
 EXCLUDE_LABEL = re.compile(r'label:\s*([^\s,;()]+)')
 ALWAYS_EXCLUDED_LABELS = ('needs-owner',)
 NOT_READY_SECTION = re.compile(r'^(?:hold|held|park|landing|landed|done|blocked)', re.IGNORECASE)
@@ -351,8 +355,10 @@ def lint_loopmd(path, offline, repo_arg=None):
     need('tier', lambda v: v in ('routine', 'guarded'), 'routine | guarded')
     need('gate', lambda v: bool(v) and v.lower() != 'none', 'the local gate command')
     need('ci-required', lambda v: bool(v), 'required check names, or none')
+    if 'tracker' in keys:
+        need('tracker', lambda v: v in TRACKERS, ' | '.join(TRACKERS))
     if 'reviewer' in keys:
-        need('reviewer', lambda v: v in ('coderabbit', 'copilot'), 'coderabbit | copilot')
+        need('reviewer', lambda v: v in ('coderabbit', 'copilot', 'kodus'), 'coderabbit | copilot | kodus')
     if 'landing' in keys:
         need('landing', lambda v: v in ('direct', 'pr'), 'direct | pr')
     if 'landing-branch' in keys:
@@ -364,10 +370,15 @@ def lint_loopmd(path, offline, repo_arg=None):
     if 'review' in keys:
         need('review', lambda v: v == 'local-pair', 'local-pair')
         if keys.get('review') == 'local-pair':
-            if keys.get('landing', 'direct') != 'direct' or not keys.get('landing-branch'):
-                report.error('L2', where['review'], 'local-pair requires direct landing and landing-branch')
+            if keys.get('landing', 'direct') == 'direct' and not keys.get('landing-branch'):
+                report.error('L2', where['review'], 'direct local-pair requires landing-branch')
             if 'reviewer' in keys:
                 report.error('L2', where['review'], 'local-pair cannot also select a hosted reviewer')
+    for key in ('review-status', 'gate-status', 'merge-hold'):
+        if key in keys and not keys[key]:
+            report.error('L2', where[key], f'`{key}:` is empty; drop the key or name the command')
+    if 'merge-hold' in keys and keys.get('landing') != 'pr':
+        report.error('L2', where['merge-hold'], '`merge-hold:` applies only to PR landing')
     # Kept for LOOP.md files that still carry them; only the pre-green eligibility rule needed them.
     for key in ('release-on-push', 'deploy-on-push'):
         if key in keys and keys[key] not in ('yes', 'no'):
@@ -558,16 +569,27 @@ def lint_charter(path):
 # --- queue (Q) -------------------------------------------------------------------------------
 
 def charter_exclusions(value):
-    """(excluded task IDs, excluded labels) from an `exclude:` value. Parenthesised titles are ignored,
-    so an ID mentioned inside one is not excluded."""
+    """(excluded task IDs and #issue numbers, excluded labels) from an `exclude:` value. Parenthesised
+    titles are ignored, so an ID mentioned inside one is not excluded."""
     labels = {m.group(1).lower() for m in EXCLUDE_LABEL.finditer(value)}
     plain = re.sub(r'\([^)]*\)', ' ', EXCLUDE_LABEL.sub(' ', value))
-    return {m.group(0).upper() for m in TASK_ID.finditer(plain)}, labels | set(ALWAYS_EXCLUDED_LABELS)
+    ids = {m.group(0).upper() for m in TASK_ID.finditer(plain)} | {'#' + m.group(1) for m in ISSUE_REF.finditer(plain)}
+    return ids, labels | set(ALWAYS_EXCLUDED_LABELS)
 
 
-def ready_rows(text):
-    """[(line, task id)]: the first task ID of every ready row. Table rows and list items count; with a
-    `## Ready` heading only its sections do, otherwise everything outside the not-ready sections."""
+def repo_tracker(repo):
+    """`backlog` or `github`: the `tracker:` key of the repository's LOOP.md, `backlog` when absent."""
+    path = Path(repo) / 'LOOP.md'
+    if not path.exists():
+        return 'backlog'
+    keys, _ = parse_loopmd_keys(path.read_text(encoding='utf-8', errors='replace'))
+    return keys.get('tracker', 'backlog')
+
+
+def ready_rows(text, tracker='backlog'):
+    """[(line, item)]: the first task ID (or, for the github tracker, the first `#N`; None when a row names
+    only a task ID) of every ready row. Table rows and list items count; with a `## Ready` heading only its
+    sections do, otherwise everything outside the not-ready sections."""
     sections = h2_sections(text)
     ready = [span for name, span in sections.items() if name.lower().startswith('ready')]
     skipped = [span for name, span in sections.items() if NOT_READY_SECTION.match(name)]
@@ -581,6 +603,13 @@ def ready_rows(text):
         elif any(a <= number <= b for a, b in skipped):
             continue
         if not (line.lstrip().startswith('|') or LIST_ITEM.match(line)):
+            continue
+        if tracker == 'github':
+            issue = ISSUE_REF.search(line)
+            if issue:
+                rows.append((number, '#' + issue.group(1)))
+            elif TASK_ID.search(line):
+                rows.append((number, None))
             continue
         found = TASK_ID.search(line)
         if found:
@@ -604,6 +633,18 @@ def backlog_task(repo, task_id):
     return status, labels
 
 
+def github_issue(slug, ref):
+    """(state, label set) from `gh issue view`; GhError when it cannot be read."""
+    result = run(['gh', 'issue', 'view', ref.lstrip('#'), '-R', slug, '--json', 'state,labels'])
+    if result.returncode != 0:
+        raise GhError(f'gh issue view {ref} failed: {(result.stderr or result.stdout).strip()[:160]}')
+    try:
+        data = json.loads(result.stdout)
+    except ValueError:
+        raise GhError(f'gh issue view {ref} returned invalid JSON')
+    return str(data.get('state', '')), {str(l.get('name', '')).lower() for l in data.get('labels') or []}
+
+
 def lint_queue(charter_path, queue_path, repo_arg=None):
     report = Report(queue_path)
     charter = read_text(report, charter_path)
@@ -620,9 +661,23 @@ def lint_queue(charter_path, queue_path, repo_arg=None):
     if charter_report.errors:
         return report
     repo = Path(repo_arg) if repo_arg else Path(charter_path).resolve().parent.parent
+    tracker = repo_tracker(repo)
+    if tracker not in TRACKERS:
+        report.error('Q4', 1, f'LOOP.md names tracker {tracker!r}, not one of {", ".join(TRACKERS)}; nothing was checked')
+        return report
+    slug = None
+    if tracker == 'github':
+        try:
+            slug = origin_slug(repo)
+        except GhError as error:
+            report.error('Q4', 1, f'tracker: github, but the issues cannot be located: {error}')
+            return report
     ids, labels = charter_exclusions(keys['exclude'])
     seen = set()
-    for number, task_id in ready_rows(queue):
+    for number, task_id in ready_rows(queue, tracker):
+        if task_id is None:
+            report.error('Q4', number, 'the row names no issue (#N); the board is not this repository\'s tracker')
+            continue
         if task_id in seen:
             continue
         seen.add(task_id)
@@ -630,15 +685,18 @@ def lint_queue(charter_path, queue_path, repo_arg=None):
             report.error('Q1', number, f'{task_id} is in the charter\'s exclude list')
             continue
         try:
-            status, task_labels = backlog_task(repo, task_id)
+            status, task_labels = github_issue(slug, task_id) if slug else backlog_task(repo, task_id)
         except GhError as error:
             report.error('Q4', number, f'{task_id}: {error}')
             continue
-        if status.lower() == 'done':
+        if slug and status.upper() != 'OPEN':
+            report.error('Q2', number, f'{task_id} is closed')
+        elif not slug and status.lower() == 'done':
             report.error('Q2', number, f'{task_id} is Done')
         for label in sorted(task_labels & labels):
             report.error('Q3', number, f'{task_id} carries the excluded label {label}')
-    report.info('Q0', 1, f'{len(seen)} ready task(s) checked against the charter and the board')
+    where = f'the issues of {slug}' if slug else 'the board'
+    report.info('Q0', 1, f'{len(seen)} ready item(s) checked against the charter and {where}')
     return report
 
 

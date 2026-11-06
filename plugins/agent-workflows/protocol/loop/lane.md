@@ -6,8 +6,8 @@ and `LOOP.md`, and appends `LOOP.md`'s `## Lane brief` section verbatim. Every l
 ## Your job
 
 You own one task in your own worktree. Implement it, prove it, and hand back an uncommitted
-candidate. You never push, never merge, never edit the Backlog unless your brief makes you a board
-lane, and never touch credentials or live systems.
+candidate. You never push, never merge, never write to the tracker (the Backlog, unless your brief makes you a
+board lane; GitHub issues and Projects, never), and never touch credentials or live systems.
 
 - Worktree: `git worktree add <worktree root>/loop<N>-<lane> origin/main` unless the brief gives
   one. Work only there, by absolute path (`git -C <worktree>`, absolute paths for reads and edits);
@@ -31,25 +31,18 @@ lane, and never touch credentials or live systems.
   (tree, base); a red that also fails on base is not yours: list both. A repaired tree is a new
   tree: rerun the gate before returning `complete`. Running the gate route is never a live-system
   touch, even when it reaches a build host.
-- For `review: local-pair`, the root composes committed ranges and runs the repository's
-  exact-repo-checked review recipe with the provider/key route in its repository instructions.
-  Lanes keep the candidate-return rules above, not the generic review wrappers below. Copilot
-  CLI and dsreview must both cover the final candidate range with no unresolved critical/major;
-  missing/incomplete verdicts block. The root records verdicts and the Reviewed-by-local trailer.
-  Do not substitute a key or allow the whole repository owner. This replaces CodeRabbit and the
-  generic dsreview invocation below; all gate and security-review obligations remain.
-- CodeRabbit: `coderabbit review --agent --base-commit <base>` once on your final candidate, with
-  `--include-untracked` so new files are reviewed. Fix every `critical`/`major`. After such a fix only, one delta review with
-  `--base-commit <last reviewed SHA>`. Skip it for docs, comments, declarative config and dependency
-  bumps. Exit 0 is not clean; no `complete` line is a failure.
-- dsreview (DeepSeek reviewer, routine and guarded alike): after writing `candidate.patch`, save
-  your brief verbatim to `<run dir>/<lane>/brief.md` and run `dsreview --repo <worktree> --base
-  <base> --patch <run dir>/<lane>/candidate.patch --brief <run dir>/<lane>/brief.md --out
-  <run dir>/<lane>/dsreview.json` (2 to 5 minutes; exit 0 PASS, 1 FAIL, 2 no verdict). Check each
-  `critical`/`major` in the code: fix what holds, re-prove, rewrite the patch and rerun dsreview once.
-  A major you judge wrong: give your evidence in `return.md` and count it as disputed. Exit 2 or no
-  `dsreview` on PATH: record it; the root adds a `reviewer`. Skip it for docs, comments, declarative
-  config and dependency bumps.
+- Local review: `<frozen provider(s), exact command(s), executor and failure policy>`. The planner
+  fills this from the enrolled context and repository contract before dispatch; never guess it.
+  After writing `candidate.patch`, save your brief verbatim to `<run dir>/<lane>/brief.md` and
+  run the frozen commands against the exact base and patch. If the root owns a repository's pair,
+  return the candidate for its committed-range review instead; do not substitute a lane wrapper.
+  Each required component must retain exact candidate identity, available context and its own
+  verdict/evidence. A submitted path/hash manifest is not proof the service used the full context.
+  Fix verified critical/major findings, re-prove and review repair deltas. Explain disputed findings
+  in `return.md`. Missing/incomplete verdicts are not PASS: apply the frozen failure policy without
+  provider/key substitution. Guarded security review and local-pair obligations still apply.
+  Skip only the categories the context policy allows, recording the reason. Record a named review
+  result and an absolute evidence artifact; the root reads the artifact before accepting it.
 - Long waits (a gate slot, a test run) are fine: your prompt cache lasts an hour. Keep each Bash
   call under its 10-minute limit and re-invoke on expiry.
 - Shell habits the hooks deny, each costing a turn: stage only named paths (`git add -- <path>`,
@@ -81,8 +74,7 @@ with exactly this block (compact JSON, at most 1,800 characters), then at most a
 {"v":3,"lane":"<id>","task":"<ID>","status":"complete|partial|blocked|failed",
  "base":"<full SHA>","worktree":"<abs path>","patch":"<abs path>","patch_sha256":"<hex>",
  "check":"<exact command>","exit":<int>|null,"tail":"<last lines, at most 40>",
- "coderabbit":{"ran":true|false,"major":<n>,"unreviewed":<n>}|null,
- "dsreview":{"verdict":"PASS|FAIL|none","major":<n>,"fixed":<n>,"disputed":<n>}|null,
+ "review":{"provider":"<frozen route>","evidence":"<abs artifact>","verdict":"PASS|FAIL|none","major":<n>,"fixed":<n>,"disputed":<n>}|null,
  "questions":["<short; details in return.md>"]}
 ```
 ````
@@ -97,3 +89,6 @@ place of `patch` and `patch_sha256`. They commit locally with explicit pathspecs
 - Run dir: `<abs path to codex/loop<N>>`.
 - Gate: `<command>`; gate route: `<recipe or slot pool>`.
 - Guarded paths: `<list>`.
+
+The validator accepts the legacy provider-specific field for already prepared runs. New runs use
+`review`; never supply both forms. A null record means no review, with the reason in `return.md`.
