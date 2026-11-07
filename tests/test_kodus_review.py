@@ -48,12 +48,14 @@ class ReviewCLI(unittest.TestCase):
         self.http_status=200; self.job_status='COMPLETED'; self.mutate_on_poll=False; self.move_on_poll=False
         self.created_at=None; self.created_override=None
         self.get_failures=0; self.get_failure_status=502
+        self.auto_count=True; self.posted_files=0
         owner=self
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self,*args): pass
             def do_POST(self):
                 body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 owner.calls.append((self.path,dict(self.headers),body))
+                owner.posted_files=len(body.get('config',{}).get('files',[]))
                 owner.created_at=owner.created_override or time.strftime('%Y-%m-%dT%H:%M:%S.123Z',time.gmtime())
                 self.send_response(owner.http_status); self.end_headers()
                 self.wfile.write(json.dumps({'data':{'jobId':'synthetic-job','status':'PENDING'}}).encode())
@@ -69,7 +71,11 @@ class ReviewCLI(unittest.TestCase):
                 if self.path!='/cli/review/jobs/synthetic-job':
                     self.send_response(404); self.end_headers(); return
                 self.send_response(200); self.end_headers()
-                self.wfile.write(json.dumps({'data':{'status':owner.job_status,'result':owner.response,
+                result=dict(owner.response)
+                if owner.auto_count:
+                    # Like the service: filesAnalyzed is the number of config.files entries.
+                    result['filesAnalyzed']=owner.posted_files
+                self.wfile.write(json.dumps({'data':{'status':owner.job_status,'result':result,
                                                      'createdAt':owner.created_at}}).encode())
         self.server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
         thread=threading.Thread(target=self.server.serve_forever,daemon=True);thread.start()
@@ -171,7 +177,7 @@ class ReviewCLI(unittest.TestCase):
         self.assertEqual(patch.decode(),self.calls[0][2]['diff'])
         self.assertEqual(patch.decode().count('diff --git '),5)
         self.assertNotIn(b'\x1b[',patch)
-        files=self.calls[0][2]['config']['files']
+        files=self.sent_files(0)
         self.assertEqual([f['path'] for f in files],expected)
         self.assertEqual(''.join(f['diff'] for f in files),patch.decode())
         self.assertTrue(all('\x1b[' not in f['diff'] for f in files))
@@ -252,7 +258,7 @@ class ReviewCLI(unittest.TestCase):
                 run,e=self.run_review({},*(['--head',head] if head else []))
                 self.assertEqual(run.returncode,0,run.stderr)
                 self.assertEqual((self.repo/'.git/index').read_bytes(),before)
-                files=self.calls[call_index][2]['config']['files']
+                files=self.sent_files(call_index)
                 self.assertEqual([f['path'] for f in files],['foo','foo/bar'])
                 self.assertEqual([f['status'] for f in files],
                                  ['deleted','added'] if label=='file-to-directory' else ['added','deleted'])
@@ -357,7 +363,7 @@ class ReviewCLI(unittest.TestCase):
 
     def test_missing_file_count_timeout_and_candidate_race_have_no_verdict(self):
         (self.repo/'a.py').write_text('value = 8\n')
-        self.response['filesAnalyzed']=0
+        self.auto_count=False;self.response['filesAnalyzed']=0
         run,e=self.run_review();self.assertEqual(run.returncode,2,run.stderr)
         self.response['filesAnalyzed']=1;self.job_status='PROCESSING'
         run,e=self.run_review({'KODUS_REVIEW_TIMEOUT':'0.15'})
@@ -416,7 +422,12 @@ class ReviewCLI(unittest.TestCase):
         self.base=self.git('rev-parse','HEAD').strip()
 
     def kodus_paths(self,call=0):
-        return [f['path'] for f in self.calls[call][2]['config']['files']]
+        return [f['path'] for f in self.sent_files(call)]
+
+    def sent_files(self,call=0):
+        """config.files entries carrying real diffs (withheld-path notices filtered out)."""
+        return [f for f in self.calls[call][2]['config']['files']
+                if not f['diff'].split('\n')[1][1:].startswith('[kodus-review:')]
 
     def test_ignored_large_recording_is_retained_locally_but_not_sent_or_refused(self):
         folder=self.repo/'testdata/replay';folder.mkdir(parents=True)
@@ -441,8 +452,10 @@ class ReviewCLI(unittest.TestCase):
         self.assertIn(b'diff --git a/testdata/replay/history.json b/testdata/replay/history.json',full)
         self.assertNotIn(b'history.json',sent)
         self.assertEqual(sent.decode(),self.calls[0][2]['diff'])
-        self.assertEqual(''.join(f['diff'] for f in self.calls[0][2]['config']['files']),sent.decode())
-        self.assertNotIn('history.json',json.dumps(self.calls[0][2]))
+        self.assertEqual(''.join(f['diff'] for f in self.sent_files(0)),sent.decode())
+        # Kodus learns the ignored path exists (a notice), never its content.
+        self.assertNotIn('"payload"',json.dumps(self.calls[0][2]))
+        self.assertEqual(self.calls[0][2]['config']['files'][-1]['path'],'testdata/replay/history.json')
         self.assertEqual((Path(candidate['snapshot_path'])/'testdata/replay/history.json').read_bytes(),
                          recording.read_bytes())
         stored=Path(candidate['ignores_path'])
@@ -634,7 +647,7 @@ class ReviewCLI(unittest.TestCase):
         run,e=self.run_review({},'--head',head);self.assertEqual(run.returncode,0,run.stderr)
         candidate=e['candidate']
         self.assertEqual(candidate['submitted_paths'],['foo']);self.assertEqual(candidate['ignored_paths'],['foo/bar.lock'])
-        files=self.calls[0][2]['config']['files']
+        files=self.sent_files(0)
         self.assertEqual([(f['path'],f['status']) for f in files],[('foo','deleted')])
         self.assertNotIn('bar.lock',self.calls[0][2]['diff'])
         self.assertEqual(Path(candidate['patch_path']).read_bytes().count(b'diff --git '),2)
@@ -750,7 +763,7 @@ class ReviewCLI(unittest.TestCase):
                          [('pkg/a.go','changed'),('AGENTS.md','include'),('pkg/b.go','same-directory')])
         self.assertEqual(scope['excluded_context_files'],1)
         self.assertEqual(self.git('cat-file','-t',candidate['tree']).strip(),'tree')
-        files=self.calls[0][2]['config']['files']
+        files=self.sent_files(0)
         self.assertEqual(files[0]['content'],'package pkg\n\nfunc A() int { return 2 }\n')
         self.assertEqual([c['path'] for c in scope['kodus']['content']],['pkg/a.go'])
         self.assertEqual(e['kodus']['request_sha256'],hashlib.sha256(
@@ -811,7 +824,7 @@ class ReviewCLI(unittest.TestCase):
                          {'gen/schema.json':'sent','lib/gen.go':'sent'})
         self.assertEqual(record['kodus']['content_withheld'],[{'path':'gen/schema.json','reason':'generated'},
                                                               {'path':'lib/gen.go','reason':'generated'}])
-        files={f['path']:f for f in self.calls[0][2]['config']['files']}
+        files={f['path']:f for f in self.sent_files(0)}
         self.assertIn('"generated": false',files['gen/schema.json']['diff'])
         self.assertEqual([m['path'] for m in record['materialised'] if m['reason']!='changed'],['lib/plain.js'])
         self.assertEqual(record['excluded_context_files'],2)
@@ -822,13 +835,13 @@ class ReviewCLI(unittest.TestCase):
         self.ignores=self.write_ignores([],kodus_content_bytes=1000)
         run,e=self.run_review()
         self.assertEqual(run.returncode,0,run.stderr)
-        files=self.calls[0][2]['config']['files']
+        files=self.sent_files(0)
         self.assertEqual(len(files[0]['content']),601);self.assertEqual(files[1]['content'],'')
         self.assertIn('BBBB',files[1]['diff'])
         self.assertEqual(self.scope_record(e)['kodus']['content_withheld'],[{'path':'b.py','reason':'budget'}])
         self.ignores=self.write_ignores([],send_changed_content=False)
         run,e=self.run_review();self.assertEqual(run.returncode,0,run.stderr)
-        self.assertEqual([f['content'] for f in self.calls[-2][2]['config']['files']],['',''])
+        self.assertEqual([f['content'] for f in self.sent_files(-2)],['',''])
 
     def test_binary_changed_files_are_withheld_and_text_parts_reviewed(self):
         binary=b'\x89PNG\x00\xfffixture'
@@ -838,7 +851,7 @@ class ReviewCLI(unittest.TestCase):
         run,e=self.run_review()
         self.assertEqual(run.returncode,0,run.stderr)
         body=self.calls[0][2]
-        self.assertEqual([f['path'] for f in body['config']['files']],['a.py'])
+        self.assertEqual(self.kodus_paths(0),['a.py'])
         self.assertNotIn('GIT binary patch',body['diff']);self.assertNotIn('image.bin',body['diff'])
         record=self.scope_record(e)
         self.assertEqual([(w['path'],w['reason'],w['status']) for w in record['kodus']['withheld_files']],
@@ -864,7 +877,7 @@ class ReviewCLI(unittest.TestCase):
         self.assertEqual(run.returncode,0,run.stderr)
         body=json.dumps(self.calls[0][2])
         self.assertNotIn('leaked',body);self.assertNotIn('base-value',body);self.assertNotIn('PRIVATE KEY',body)
-        self.assertEqual([f['path'] for f in self.calls[0][2]['config']['files']],['a.py','app/main.py'])
+        self.assertEqual([f['path'] for f in self.sent_files(0)],['a.py','app/main.py'])
         withheld={w['path']:w['reason'] for w in self.scope_record(e)['kodus']['withheld_files']}
         self.assertEqual(withheld,{p:'secret-pattern' for p in ('.env','app/secrets.yml','certs/site.pem',
                                                                  'deploy/credentials/token.txt','deploy/prod.tfvars')})
@@ -884,7 +897,7 @@ class ReviewCLI(unittest.TestCase):
             self.write(name,'changed-value '+name+'\n')
         run,e=self.run_review()
         self.assertEqual(run.returncode,0,run.stderr)
-        self.assertEqual([f['path'] for f in self.calls[0][2]['config']['files']],['internal/auth/secret_reveal.go'])
+        self.assertEqual([f['path'] for f in self.sent_files(0)],['internal/auth/secret_reveal.go'])
         self.assertEqual(sorted(w['path'] for w in self.scope_record(e)['kodus']['withheld_files']),
                          ['conf/db-secret.ini','conf/secrets.toml','config/app-secret.json','deploy/secrets/x.yaml'])
 
@@ -903,7 +916,7 @@ class ReviewCLI(unittest.TestCase):
         run,e=self.run_review()
         self.assertEqual(run.returncode,0,run.stderr)
         self.assertNotIn('leaked',json.dumps(self.calls[0][2]))
-        self.assertEqual([f['path'] for f in self.calls[0][2]['config']['files']],['a.py'])
+        self.assertEqual([f['path'] for f in self.sent_files(0)],['a.py'])
         withheld={w['path']:w['reason'] for w in self.scope_record(e)['kodus']['withheld_files']}
         self.assertEqual(withheld,{n:'secret-pattern' for n in names})
 
@@ -942,7 +955,8 @@ class ReviewCLI(unittest.TestCase):
         (self.repo/'.ENV').chmod(0o755);self.write('a.py','value = 4\n')
         run,e=self.run_review()
         self.assertEqual(run.returncode,0,run.stderr)
-        self.assertNotIn('.ENV',json.dumps(self.calls[0][2]))
+        self.assertNotIn('mode-only-secret',json.dumps(self.calls[0][2]))
+        self.assertEqual(self.kodus_paths(),['a.py'])
         self.assertEqual({d['path']:d['disposition'] for d in e['candidate']['dispositions']},
                          {'.ENV':'secret-pattern','a.py':'sent'})
 
@@ -960,7 +974,7 @@ class ReviewCLI(unittest.TestCase):
         self.assertEqual(self.calls,[])
         self.ignores=self.write_ignores(['**/.env'],secret_add=['**/*.vault'])
         run,e=self.run_review();self.assertEqual(run.returncode,0,run.stderr)
-        self.assertEqual([f['path'] for f in self.calls[0][2]['config']['files']],['a.py'])
+        self.assertEqual([f['path'] for f in self.sent_files(0)],['a.py'])
         self.assertEqual({d['path']:d['disposition'] for d in e['candidate']['dispositions']},
                          {'.env':'secret-pattern','a.py':'sent','conf/x.vault':'secret-pattern'})
         self.assertIn('**/.env',self.scope_record(e)['effective']['secret_patterns'])
@@ -1188,7 +1202,7 @@ class ReviewCLI(unittest.TestCase):
         self.assertEqual({d['path']:d['disposition'] for d in e['candidate']['dispositions']},
                          {'.env':'secret-pattern','.env/readme.md':'sent','logo.png':'binary','logo.png/notes.txt':'sent'})
         body=self.calls[0][2]
-        self.assertEqual([f['path'] for f in body['config']['files']],['.env/readme.md','logo.png/notes.txt'])
+        self.assertEqual(self.kodus_paths(0),['.env/readme.md','logo.png/notes.txt'])
         self.assertNotIn('TOKEN',body['diff']);self.assertNotIn('GIT binary patch',body['diff'])
 
     def test_secret_copy_detection_fails_closed_when_it_cannot_run_completely(self):
@@ -1644,5 +1658,130 @@ class ReviewCLI(unittest.TestCase):
         run,e=self.run_review(patched=fast)
         self.assertEqual(run.returncode,2,run.stderr);self.assertIn('HTTP 502',e['kodus']['error'])
         self.assertEqual(len(self.calls)-calls,1)
+
+    def test_kodus_is_told_withheld_paths_exist_but_never_their_content(self):
+        self.write('db/migrations/119_x.sql','-- migration\n');self.write('.env','TOKEN=base\n')
+        self.write('img.bin',b'\x00old');self.commit_all('base')
+        self.write('db/migrations/119_x.sql','-- migration from digest abc\n')
+        snapshot=self.write('db/migrations/snapshots/abc.sql.gz',b'\x1f\x8b\x00SNAPSHOT-CONTENT')
+        self.write('.env','TOKEN=leaked-value\n');self.write('img.bin',b'\x00new-binary-content')
+        (self.repo/'gone.lock').unlink() if (self.repo/'gone.lock').exists() else None
+        self.ignores=self.write_ignores(['db/migrations/snapshots/**'])
+        renderer,_=self.write_renderer(self.ignores.read_bytes())
+        run,e=self.run_review({'KODUS_REVIEW_IGNORES_RENDERER':str(renderer)})
+        self.assertEqual(run.returncode,0,e and e['kodus'].get('error'))
+        body=self.calls[0][2];files=body['config']['files']
+        self.assertEqual([f['path'] for f in files],
+                         ['db/migrations/119_x.sql','.env','img.bin','db/migrations/snapshots/abc.sql.gz'])
+        stubs={f['path']:f for f in files[1:]}
+        self.assertEqual(stubs['db/migrations/snapshots/abc.sql.gz'],{'path':'db/migrations/snapshots/abc.sql.gz',
+            'status':'added','content':'','diff':'@@ -0,0 +1 @@\n+[kodus-review: this changed file is part of the '
+            'change but withheld from this review (ignored by the repository review scope); its content is not '
+            'shown; %d bytes]\n' % snapshot.stat().st_size})
+        # Secrets: name and class only, no size or blob.
+        self.assertEqual(stubs['.env']['diff'],'@@ -0,0 +1 @@\n+[kodus-review: this changed file is part of the '
+                         'change but withheld from this review (secret file); its content is not shown]\n')
+        self.assertEqual(stubs['img.bin']['status'],'modified');self.assertIn('(binary)',stubs['img.bin']['diff'])
+        text=json.dumps(body)
+        for secret in ('leaked-value','SNAPSHOT-CONTENT','new-binary-content','TOKEN='):
+            self.assertNotIn(secret,text)
+        # The raw diff (git-applied in the service's sandbox) carries only the real sent diff.
+        self.assertEqual(body['diff'],files[0]['diff'])
+        self.assertEqual(body['diff'].encode(),Path(e['candidate']['submitted_patch_path']).read_bytes())
+        self.assertEqual(json.loads(Path(e['candidate']['files_path']).read_text()),files)
+        self.assertEqual(e['candidate']['notified_paths'],['.env','img.bin','db/migrations/snapshots/abc.sql.gz'])
+        self.assertEqual({d['path']:d.get('notified') for d in e['candidate']['dispositions']},
+                         {'.env':'individual','db/migrations/119_x.sql':None,
+                          'db/migrations/snapshots/abc.sql.gz':'individual','img.bin':'individual'})
+        self.assertEqual(e['kodus']['result']['filesAnalyzed'],4)
+        code,report=self.run_verify(e['evidence_path'],renderer)
+        self.assertEqual((code,report['verdict']),(0,'VERIFIED'),report)
+        # Over the request bound: secret, then binary, then ignored get individual notices while
+        # they fit; the last one also counts the rest.
+        run,e=self.run_review(patched={'MAX_SENT_FILES':3})
+        self.assertEqual(run.returncode,0,e and e['kodus'].get('error'))
+        files=self.calls[-2][2]['config']['files']
+        self.assertEqual([f['path'] for f in files],['db/migrations/119_x.sql','.env','img.bin'])
+        self.assertTrue(files[-1]['diff'].endswith('+[kodus-review: 1 further changed paths are withheld from '
+                                                    'this review and not listed individually: ignored 1, binary 0, secret 0]\n'))
+        self.assertEqual({d['path']:d.get('notified') for d in e['candidate']['dispositions']},
+                         {'.env':'individual','db/migrations/119_x.sql':None,
+                          'db/migrations/snapshots/abc.sql.gz':'grouped','img.bin':'individual'})
+        # SKIPPED makes no request, so nothing is notified.
+        self.write('db/migrations/119_x.sql','-- migration\n');self.write('.env','TOKEN=base\n')
+        self.write('img.bin',b'\x00old')
+        self.ignores=self.write_ignores(['db/migrations/snapshots/**'])
+        run,e=self.run_review()
+        self.assertEqual(e['kodus']['verdict'],'SKIPPED')
+        self.assertEqual([(d.get('notified'),d.get('notified_reason')) for d in e['candidate']['dispositions']],
+                         [(False,'skipped')])
+
+    def test_hundreds_of_ignored_paths_beside_real_edits_still_get_a_verdict(self):
+        for i in range(10):
+            self.write('src/m%02d.py' % i,'v = 0\n')
+        self.commit_all('base')
+        for i in range(10):
+            self.write('src/m%02d.py' % i,'v = 1\n')
+        for i in range(600):
+            self.write('fixtures/rec%03d.json' % i,'{"n": %d}\n' % i)
+        self.ignores=self.write_ignores(['fixtures/**'])
+        renderer,_=self.write_renderer(self.ignores.read_bytes())
+        run,e=self.run_review({'KODUS_REVIEW_IGNORES_RENDERER':str(renderer)})
+        self.assertEqual(run.returncode,0,e and e['kodus'].get('error'))
+        files=self.calls[0][2]['config']['files']
+        self.assertEqual(len(files),500);self.assertEqual(len(self.sent_files()),10)
+        self.assertEqual(e['kodus']['result']['filesAnalyzed'],500)
+        self.assertEqual([f['path'] for f in files[10:]],['fixtures/rec%03d.json' % i for i in range(490)])
+        self.assertTrue(files[-1]['diff'].endswith('+[kodus-review: 110 further changed paths are withheld from '
+                                                    'this review and not listed individually: ignored 110, binary 0, secret 0]\n'))
+        notified=[d['notified'] for d in e['candidate']['dispositions'] if d['disposition']=='ignored']
+        self.assertEqual((notified.count('individual'),notified.count('grouped')),(490,110))
+        code,report=self.run_verify(e['evidence_path'],renderer)
+        self.assertEqual((code,report['verdict']),(0,'VERIFIED'),report)
+
+    def test_more_than_500_sent_paths_still_refuse(self):
+        for i in range(501):
+            self.write('s/f%03d.py' % i,'v = %d\n' % i)
+        run,e=self.run_review()
+        self.assertEqual(run.returncode,2,run.stderr)
+        self.assertIn('API limit of 500',e['kodus']['error'])
+        self.assertEqual(self.calls,[])
+
+    def test_notices_carry_no_blob_id_and_overlong_withheld_paths_are_grouped(self):
+        # A 4-digit fixture: a blob id would let anyone recover the content by trying all 10,000.
+        self.write('fixtures/pin.txt','4821');self.write('a.py','value = 130\n')
+        longdir='/'.join(['d'*99]*5)
+        longpath='fixtures/'+longdir+'/'+'f'*4+'.json'
+        self.assertGreater(len(longpath),500)
+        self.write(longpath,'{"long": true}\n')
+        self.ignores=self.write_ignores(['fixtures/**'])
+        renderer,_=self.write_renderer(self.ignores.read_bytes())
+        run,e=self.run_review({'KODUS_REVIEW_IGNORES_RENDERER':str(renderer)})
+        self.assertEqual(run.returncode,0,e and e['kodus'].get('error'))
+        files=json.loads(Path(e['candidate']['files_path']).read_text())
+        pin=self.git('rev-parse',e['candidate']['tree']+':fixtures/pin.txt').strip()
+        self.assertNotIn(pin,json.dumps(files));self.assertNotIn('blob',json.dumps(files))
+        self.assertEqual([f['path'] for f in files],['a.py','fixtures/pin.txt'])
+        self.assertEqual(files[1]['diff'],'@@ -0,0 +1,2 @@\n+[kodus-review: this changed file is part of the change but '
+                         'withheld from this review (ignored by the repository review scope); its content is not shown; '
+                         '4 bytes]\n+[kodus-review: 1 further changed paths are withheld from this review and not listed '
+                         'individually: ignored 1, binary 0, secret 0]\n')
+        self.assertEqual({d['path']:d.get('notified') for d in e['candidate']['dispositions']},
+                         {'a.py':None,'fixtures/pin.txt':'individual',longpath:'grouped'})
+        code,report=self.run_verify(e['evidence_path'],renderer)
+        self.assertEqual((code,report['verdict']),(0,'VERIFIED'),report)
+
+    def test_exactly_500_sent_paths_leave_no_slot_for_notices(self):
+        for i in range(500):
+            self.write('s/f%03d.py' % i,'v = %d\n' % i)
+        self.write('fixtures/rec.json','{}\n')
+        self.ignores=self.write_ignores(['fixtures/**'])
+        run,e=self.run_review()
+        self.assertEqual(run.returncode,0,e and e['kodus'].get('error'))
+        self.assertEqual(len(self.calls[0][2]['config']['files']),500)
+        withheld=[d for d in e['candidate']['dispositions'] if d['disposition']=='ignored']
+        self.assertEqual([(d['path'],d['notified'],d['notified_reason']) for d in withheld],
+                         [('fixtures/rec.json',False,'no-slot')])
+        self.assertTrue(all('notified_reason' not in d for d in e['candidate']['dispositions'] if d['disposition']=='sent'))
 
 if __name__=='__main__': unittest.main()

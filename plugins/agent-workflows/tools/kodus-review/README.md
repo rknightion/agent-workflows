@@ -94,8 +94,28 @@ The built-in secret list is secret FILE shapes only: `.env`, `.env.*`, `*.env`, 
 after secrets (`internal/auth/secret_reveal.go`) is reviewed. No document key, ignore pattern or
 `drop_shared` entry can un-withhold a secret.
 
-Only `sent` paths go to Kodus. Secret, ignored and binary paths are never sent to Kodus: no diff and
-no content. The full `candidate.patch`, including secret diffs, is written locally for the
+Only `sent` paths go to Kodus as diffs. Secret, ignored and binary paths are never sent to Kodus: no
+diff and no content. Kodus is still told that each of them is part of the change, so it does not
+report a missing file: when a request is made, `config.files` gets one notice per withheld path,
+after the sent entries, with the real status, empty `content`, and a one-line hunk such as
+
+    @@ -0,0 +1 @@
+    +[kodus-review: this changed file is part of the change but withheld from this review (ignored by the repository review scope); its content is not shown; 311843 bytes]
+
+(`@@ -1 +0,0 @@` with a `-` line for a deletion). The class is `ignored by the repository review
+scope`, `binary`, `secret file` or `copy of a secret file`; secret paths carry only their name and
+class, other paths also their size (candidate side, base side for a deletion), never a blob id,
+which for a small file could be brute-forced back to its content. A withheld path over the API's
+500-character limit is never listed individually; it is counted in the grouped line. Notices
+are not in the raw `diff` field, which the service `git apply`s in its sandbox. Sent paths always
+get their real entries (over 500 of them is no verdict). Notices fill the rest of the 500-file
+request limit in order: secret, then binary, then ignored, each by path. If not all fit, the last
+notice also carries `+[kodus-review: N further changed paths are withheld from this review and not
+listed individually: ignored a, binary b, secret c]`. Each withheld disposition records `notified`
+as `individual`, `grouped` or false, and a false one carries `notified_reason`: `skipped` (SKIPPED,
+no request is made) or `no-slot` (no request entry remained to carry a notice, for example when
+exactly 500 sent paths fill the limit; sent paths keep priority);
+`notified_paths` lists the individual notices. The full `candidate.patch`, including secret diffs, is written locally for the
 independent reviewer and is the only local carrier of secret content; secrets are never copied into
 either snapshot.
 
@@ -230,7 +250,8 @@ excluded-context count, budget use, and under `kodus` the diff paths, every with
 reason and blobs, every content path with its hash and size, and every withheld content path.
 `kodus` holds `request_sha256` and `request_bytes` (recorded before the POST), the component
 verdict, job identity, raw result and `context: partial-or-unknown`. Returned `filesAnalyzed` must
-equal the submitted-path count; that is a sanity check, not semantic coverage proof. The brief is
+equal the submitted-path count plus the notices (the service counts `config.files`); that is a
+sanity check, not semantic coverage proof. The brief is
 retained for the independent local agent and is **not sent to Kodus**.
 
 Exits: 0 means the **Kodus component** reported no blocking findings or was `SKIPPED`; 1 means
@@ -272,6 +293,7 @@ authenticated client (launcher token file and endpoint; nothing recorded in evid
 them, and evidence captured against a different origin, or against the localhost test fixture
 when verify is not itself in it, is refused; no redirects, no proxies) and requires status
 `COMPLETED`, a result identical to the stored one, `filesAnalyzed` equal to the submitted-path
+plus notice
 count, and the recorded `createdAt`, no earlier than the recorded capture time minus 120 seconds
 of clock skew. `captured_at` is written by whoever ran the capture and is not recomputed, so this
 check binds only unedited evidence; it is not a freshness guarantee and sits inside the residual

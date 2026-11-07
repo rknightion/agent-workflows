@@ -591,6 +591,33 @@ def require_unaddable(repo, evidence, directory):
     if addable:
         raise Refusal('Evidence artifact would be committable (not Git-ignored): ' + addable[0])
 
+WITHHELD_CLASS = {'ignored': 'ignored by the repository review scope', 'binary': 'binary',
+                  'secret-pattern': 'secret file', 'secret-copy': 'copy of a secret file'}
+
+def withheld_stub(path, status, disposition, entry):
+    """A config.files entry telling Kodus a changed path exists without any of its content. Secret
+    paths carry only their name and class; others also their size. No blob id: for a small file it
+    can be brute-forced back to the content."""
+    detail = ''
+    if not disposition.startswith('secret') and entry:
+        detail = '; %d bytes' % entry['bytes']
+    line = ('[kodus-review: this changed file is part of the change but withheld from this review (%s); '
+            'its content is not shown%s]' % (WITHHELD_CLASS[disposition], detail))
+    diff = ('@@ -1 +0,0 @@\n-' if status == 'deleted' else '@@ -0,0 +1 @@\n+') + line + '\n'
+    return {'path': path, 'status': status, 'diff': diff, 'content': ''}
+
+def with_grouped_line(stub, further, counts):
+    """The last notice also states how many further withheld paths are not listed individually."""
+    grouped = ('[kodus-review: %d further changed paths are withheld from this review and not listed '
+               'individually: ignored %d, binary %d, secret %d]'
+               % (further, counts['ignored'], counts['binary'], counts['secret']))
+    line = stub['diff'].split('\n')[1][1:]
+    if stub['status'] == 'deleted':
+        diff = '@@ -1 +1 @@\n-' + line + '\n+' + grouped + '\n'
+    else:
+        diff = '@@ -0,0 +1,2 @@\n+' + line + '\n+' + grouped + '\n'
+    return {**stub, 'diff': diff}
+
 def within_bound(artifact, data, limit):
     if len(data) > limit:
         raise Refusal('Artifact %s exceeds its %d-byte bound; no review verdict' % (artifact, limit))
@@ -864,6 +891,40 @@ def capture_view(local, view, base, head, directory, brief, ignores, recorded_tr
                 content.append({'path':item['path'], 'sha256':digest(text.encode('utf-8')), 'bytes':size})
                 continue
         content_withheld.append({'path':item['path'], 'reason':reason})
+    # Kodus is told that each withheld changed path exists, never its content: one stub entry per
+    # path in config.files (not in the raw diff, which the service `git apply`s in its sandbox).
+    # Individual notices fill the request up to its file limit (secret, then binary, then ignored,
+    # each by path); the last one also carries a grouped line counting the rest.
+    notified, notice_of = [], {}
+    if not all_ignored:
+        order = {'secret-pattern': 0, 'secret-copy': 0, 'binary': 1, 'ignored': 2}
+        withheld_rows = sorted((row for row in rows if by_path[row[0].decode()] != 'sent'),
+                               key=lambda row: (order[by_path[row[0].decode()]], row[0]))
+        capacity = max(0, MAX_SENT_FILES - len(files))
+        # A path over the API's 500-character limit cannot have its own entry: it is only counted.
+        listable = [row for row in withheld_rows if len(row[0].decode()) <= 500]
+        too_long = [row for row in withheld_rows if len(row[0].decode()) > 500]
+        individual, grouped = listable[:capacity], listable[capacity:] + too_long
+        for row in individual:
+            name = row[0].decode()
+            entry = base_files.get(row[0]) if status_of[row[0]] == 'deleted' else candidate_files.get(row[0])
+            notified.append(withheld_stub(name, status_of[row[0]], by_path[name], entry))
+            notice_of[name] = 'individual'
+        if grouped and notified:
+            counts = {'ignored': 0, 'binary': 0, 'secret': 0}
+            for row in grouped:
+                disposition = by_path[row[0].decode()]
+                counts['secret' if disposition.startswith('secret') else disposition] += 1
+                notice_of[row[0].decode()] = 'grouped'
+            notified[-1] = with_grouped_line(notified[-1], len(grouped), counts)
+    for item in dispositions:
+        if item['disposition'] != 'sent':
+            item['notified'] = notice_of.get(item['path'], False)
+            if item['notified'] is False:
+                # skipped: no request was made; no-slot: no request entry remained to carry a notice
+                # (sent paths filled the limit, or only unlistable paths were withheld).
+                item['notified_reason'] = 'skipped' if all_ignored else 'no-slot'
+    files = files + notified
     files_bytes = within_bound('files.json', encoded(files), MAX_FILES_JSON_BYTES)
     snapshot = directory/'snapshot'; base_snapshot = directory/'base-snapshot'
     manifest_bytes = materialise(candidate_files, snapshot)
@@ -889,6 +950,7 @@ def capture_view(local, view, base, head, directory, brief, ignores, recorded_tr
                         'kodus_content_bytes':document['kodus_content_bytes'],
                         'kodus_content_bytes_used':content_used},
               'kodus':{'diff_paths':sent, 'withheld_files':withheld_files, 'content':content,
+                       'notified':[{'path':f['path'], 'status':f['status'], 'diff':f['diff']} for f in notified],
                        'content_withheld':content_withheld, 'patch_bytes':len(submitted),
                        'patch_sha256':digest(submitted)}}
     scope_bytes = within_bound('scope.json', encoded(record), MAX_SCOPE_JSON_BYTES)
@@ -908,7 +970,8 @@ def capture_view(local, view, base, head, directory, brief, ignores, recorded_tr
             'brief_sha256':digest(brief), 'files_sha256':digest(files_bytes),
             'files_path':str(directory/'files.json'), 'snapshot_manifest_sha256':digest(manifest_bytes),
             'base_manifest_sha256':digest(base_manifest), 'changed_paths':changed,
-            'dispositions':dispositions, 'submitted_paths':sent, 'ignored_paths':ignored,
+            'dispositions':dispositions, 'submitted_paths':sent, 'notified_paths':[f['path'] for f in notified],
+            'ignored_paths':ignored,
             'withheld_paths':withheld, 'all_changed_paths_ignored':all_ignored,
             'unsent_paths_outside_grammar':[p for p in changed if by_path[p] != 'sent' and not in_raw_grammar(p)],
             'snapshot_path':str(snapshot), 'base_snapshot_path':str(base_snapshot),
@@ -1022,8 +1085,11 @@ def review(candidate, patch, audit, persist):
     if digest(files_bytes) != candidate['files_sha256']:
         raise Refusal('Structured file artifact changed before submission')
     files=json.loads(files_bytes)
-    if ''.join(f['diff'] for f in files).encode('utf-8') != patch or [f['path'] for f in files] != candidate['submitted_paths']:
-        raise Refusal('Structured request differs from captured submitted patch')
+    sent_count=len(candidate['submitted_paths'])
+    if (''.join(f['diff'] for f in files[:sent_count]).encode('utf-8') != patch
+            or [f['path'] for f in files[:sent_count]] != candidate['submitted_paths']
+            or [f['path'] for f in files[sent_count:]] != candidate['notified_paths']):
+        raise Refusal('Structured request differs from captured submitted patch and notices')
     body=request_body(candidate, files_bytes, patch)
     audit['request_sha256']=digest(body);audit['request_bytes']=len(body)
     persist()
@@ -1054,8 +1120,9 @@ def review(candidate, patch, audit, persist):
     persist()
     if not isinstance(result,dict) or not isinstance(result.get('issues'),list):
         raise Refusal('Malformed review result')
-    if type(result.get('filesAnalyzed')) is not int or result['filesAnalyzed'] != len(candidate['submitted_paths']):
-        raise Refusal('Reported file count differs from submitted paths; no complete component verdict')
+    if (type(result.get('filesAnalyzed')) is not int
+            or result['filesAnalyzed'] != len(candidate['submitted_paths']) + len(candidate['notified_paths'])):
+        raise Refusal('Reported file count differs from submitted paths and notices; no complete component verdict')
     blocking=False
     for finding in result['issues']:
         if not isinstance(finding,dict) or finding.get('severity') not in ('critical','high','major','error','medium','warning','low','minor','info'):
@@ -1077,7 +1144,7 @@ def request_body(candidate, files_bytes, patch):
 BLOCKING = ('critical','high','major','error')
 VERIFIED_KEYS = ('tree', 'base_tree', 'patch_sha256', 'submitted_patch_sha256', 'files_sha256',
                  'snapshot_manifest_sha256', 'base_manifest_sha256', 'scope_sha256', 'brief_sha256',
-                 'changed_paths', 'dispositions', 'submitted_paths', 'ignored_paths', 'withheld_paths',
+                 'changed_paths', 'dispositions', 'submitted_paths', 'notified_paths', 'ignored_paths', 'withheld_paths',
                  'all_changed_paths_ignored', 'ignores_sha256', 'ignores_commit', 'ignores_source')
 ARTIFACT_HASHES = (('patch_path','patch_sha256'), ('submitted_patch_path','submitted_patch_sha256'),
                    ('files_path','files_sha256'), ('manifest_path','snapshot_manifest_sha256'),
@@ -1230,7 +1297,7 @@ def verify(evidence_path, repo):
             raise Refusal('Kodus job result differs from the evidence')
         if (not isinstance(result, dict) or not isinstance(result.get('issues'), list)
                 or type(result.get('filesAnalyzed')) is not int
-                or result['filesAnalyzed'] != len(fresh['submitted_paths'])):
+                or result['filesAnalyzed'] != len(fresh['submitted_paths']) + len(fresh['notified_paths'])):
             raise Refusal('Kodus result does not cover the recomputed submission')
         created = fetched.get('createdAt')
         if created != kodus.get('job_created_at'):

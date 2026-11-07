@@ -48,7 +48,10 @@ repository, refuses the run.
 
 Each changed path gets one disposition: `secret-pattern`, `secret-copy`, `ignored`, `binary` or
 `sent`, in that precedence. Only `sent` paths are sent to Kodus, as a diff plus full content within
-the content budget. Secret, ignored and binary paths are never sent to Kodus. The built-in secret
+the content budget. Secret, ignored and binary paths are never sent to Kodus; it gets only a
+content-free notice per withheld path (name and class; size for non-secrets) so it knows
+the file is part of the change. A withheld path with `notified: false` gives `notified_reason`:
+`skipped` (no request) or `no-slot` (sent paths filled the request limit). The built-in secret
 list can only be extended, never removed. Secrets are never copied into a snapshot; the full local
 `candidate.patch` is their only local carrier.
 
@@ -146,8 +149,9 @@ job reviewed this exact submission; that residual is why the independent review 
 The root reads both artifacts and verifies matching repository, base/head, tree, patch, brief,
 ignores, scope and candidate and base manifest hashes, artifact integrity, and current candidate
 identity. Bind the Kodus verdict to what Kodus received: `submitted.patch` must hash to
-`submitted_patch_sha256`, `files.json` to `files_sha256`, and the result's `filesAnalyzed` must
-equal the length of `submitted_paths`; every changed path must appear once in `dispositions`. Both components must PASS, except that a Kodus `SKIPPED` for all-changed-paths-ignored
+`submitted_patch_sha256`, `files.json` (sent diffs plus one content-free notice per withheld path,
+`notified_paths`) to `files_sha256`, and the result's `filesAnalyzed` must
+equal the length of `submitted_paths` plus `notified_paths`; every changed path must appear once in `dispositions`. Both components must PASS, except that a Kodus `SKIPPED` for all-changed-paths-ignored
 leaves the independent PASS as the deciding verdict; FAIL, NO_VERDICT, missing evidence or an
 identity mismatch blocks the combined gate. Neither review
 substitutes for the other. Preserve Kodus context limitations even when the combined gate passes.
