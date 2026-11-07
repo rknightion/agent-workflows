@@ -1784,4 +1784,41 @@ class ReviewCLI(unittest.TestCase):
                          [('fixtures/rec.json',False,'no-slot')])
         self.assertTrue(all('notified_reason' not in d for d in e['candidate']['dispositions'] if d['disposition']=='sent'))
 
+    def test_grouped_line_never_makes_a_deletion_claim_a_new_side(self):
+        bound={'MAX_SENT_FILES':3}
+        self.ignores=self.write_ignores(['fixtures/**'])
+        renderer,_=self.write_renderer(self.ignores.read_bytes())
+        line=lambda p,n:('[kodus-review: this changed file is part of the change but withheld from this review '
+                         '(ignored by the repository review scope); its content is not shown; %d bytes]' % n)
+        grouped='[kodus-review: 1 further changed paths are withheld from this review and not listed individually: ignored 1, binary 0, secret 0]'
+        # Shape 1: the last individual notice is a deletion, so the grouped line moves to the last
+        # notice with a new side and the deletion keeps @@ -1 +0,0 @@.
+        self.write('fixtures/z-old.json','old\n');self.commit_all('base')
+        (self.repo/'fixtures/z-old.json').unlink()
+        self.write('fixtures/a.json','a\n');self.write('fixtures/zz.json','zz\n');self.write('a.py','value = 140\n')
+        run,e=self.run_review({'KODUS_REVIEW_IGNORES_RENDERER':str(renderer)},patched=bound)
+        self.assertEqual(run.returncode,0,e and e['kodus'].get('error'))
+        files={f['path']:f for f in self.calls[-2][2]['config']['files']}
+        self.assertEqual(files['fixtures/a.json']['diff'],'@@ -0,0 +1,2 @@\n+%s\n+%s\n' % (line('a',2),grouped))
+        self.assertEqual(files['fixtures/z-old.json']['diff'],'@@ -1 +0,0 @@\n-%s\n' % line('z',4))
+        self.assertEqual(e['candidate']['dispositions'][-1],{'path':'fixtures/zz.json','status':'added',
+                                                             'disposition':'ignored','notified':'grouped'})
+        code,report=self.run_verify(e['evidence_path'],renderer,patched=bound)
+        self.assertEqual((code,report['verdict']),(0,'VERIFIED'),report)
+        # Shape 2: every notice is a deletion: both lines stay on the old side.
+        for name in ('fixtures/a.json','fixtures/zz.json'):
+            (self.repo/name).unlink()
+        self.write('fixtures/d1.json','one\n');self.write('fixtures/d2.json','two\n');self.write('fixtures/d3.json','three\n')
+        self.commit_all('deletions base')
+        for name in ('fixtures/d1.json','fixtures/d2.json','fixtures/d3.json'):
+            (self.repo/name).unlink()
+        self.write('a.py','value = 141\n')
+        run,e=self.run_review({'KODUS_REVIEW_IGNORES_RENDERER':str(renderer)},patched=bound)
+        self.assertEqual(run.returncode,0,e and e['kodus'].get('error'))
+        files={f['path']:f for f in self.calls[-2][2]['config']['files']}
+        self.assertEqual(files['fixtures/d2.json']['diff'],'@@ -1,2 +0,0 @@\n-%s\n-%s\n' % (line('d2',4),grouped))
+        self.assertEqual(files['fixtures/d1.json']['diff'],'@@ -1 +0,0 @@\n-%s\n' % line('d1',4))
+        code,report=self.run_verify(e['evidence_path'],renderer,patched=bound)
+        self.assertEqual((code,report['verdict']),(0,'VERIFIED'),report)
+
 if __name__=='__main__': unittest.main()

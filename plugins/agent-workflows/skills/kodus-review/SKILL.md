@@ -139,7 +139,7 @@ for a worktree candidate the current working tree, which must equal the recorded
 verify before the worktree moves on) and requires the same per-path `dispositions`, `submitted_paths`, `submitted.patch`,
 `files.json`, manifests and scope record, SKIPPED eligibility and request hash. For a PASS or FAIL
 it re-fetches the Kodus job and requires the stored result to be identical and `filesAnalyzed`
-equal to the submitted paths (the `createdAt` against `captured_at` check binds only unedited
+equal to the submitted paths plus the notified paths (the `createdAt` against `captured_at` check binds only unedited
 evidence, since the capture writes `captured_at`; it is no freshness guarantee); a network or authentication failure
 is no verdict. Exit 0 with `"verdict": "VERIFIED"` is required; any mismatch or error is no verdict.
 Take `base`, `head` and `tree` from verify's output, and require `ignores_commit` to equal the

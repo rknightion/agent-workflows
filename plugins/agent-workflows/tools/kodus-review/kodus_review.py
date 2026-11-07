@@ -613,7 +613,8 @@ def with_grouped_line(stub, further, counts):
                % (further, counts['ignored'], counts['binary'], counts['secret']))
     line = stub['diff'].split('\n')[1][1:]
     if stub['status'] == 'deleted':
-        diff = '@@ -1 +1 @@\n-' + line + '\n+' + grouped + '\n'
+        # Both lines on the old side: a deletion never claims the file still exists.
+        diff = '@@ -1,2 +0,0 @@\n-' + line + '\n-' + grouped + '\n'
     else:
         diff = '@@ -0,0 +1,2 @@\n+' + line + '\n+' + grouped + '\n'
     return {**stub, 'diff': diff}
@@ -916,7 +917,11 @@ def capture_view(local, view, base, head, directory, brief, ignores, recorded_tr
                 disposition = by_path[row[0].decode()]
                 counts['secret' if disposition.startswith('secret') else disposition] += 1
                 notice_of[row[0].decode()] = 'grouped'
-            notified[-1] = with_grouped_line(notified[-1], len(grouped), counts)
+            # The grouped line rides on the last notice that has a new side; a deletion notice keeps
+            # zero new lines, so it is used only when every notice is a deletion.
+            carriers = [i for i, stub in enumerate(notified) if stub['status'] != 'deleted']
+            carrier = carriers[-1] if carriers else len(notified) - 1
+            notified[carrier] = with_grouped_line(notified[carrier], len(grouped), counts)
     for item in dispositions:
         if item['disposition'] != 'sent':
             item['notified'] = notice_of.get(item['path'], False)

@@ -111,7 +111,8 @@ are not in the raw `diff` field, which the service `git apply`s in its sandbox. 
 get their real entries (over 500 of them is no verdict). Notices fill the rest of the 500-file
 request limit in order: secret, then binary, then ignored, each by path. If not all fit, the last
 notice also carries `+[kodus-review: N further changed paths are withheld from this review and not
-listed individually: ignored a, binary b, secret c]`. Each withheld disposition records `notified`
+listed individually: ignored a, binary b, secret c]` (on the last notice with a new side; only if
+every notice is a deletion does it go on the last one, as a second `-` line under `@@ -1,2 +0,0 @@`). Each withheld disposition records `notified`
 as `individual`, `grouped` or false, and a false one carries `notified_reason`: `skipped` (SKIPPED,
 no request is made) or `no-slot` (no request entry remained to carry a notice, for example when
 exactly 500 sent paths fill the limit; sent paths keep priority);
