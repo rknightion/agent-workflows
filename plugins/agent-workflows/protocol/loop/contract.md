@@ -149,7 +149,8 @@ or format this contract or the charter fixes, quote that line in `Why:`.
      block for each new head.
   3. A process watcher waits for the profile's review of the exact head.
   4. Verify untrusted findings. Fix every one that holds in one commit and push; re-gate touched
-     legs and return to 3. Disputes go to `DECISIONS.md` and the owner (overnight: park, `owner`),
+     legs and return to 3. Answer each verified thread with a reply giving the fix or the evidence,
+     then resolve it; this is root work and needs a standing grant that names it. Disputes go to `DECISIONS.md` and the owner (overnight: park, `owner`),
      not a round. Never dismiss a finding to pass the gate.
   5. Wait at most about 20 minutes, 3 review rounds per PR; then record and ask the owner
      (overnight: park, `owner`). A new push invalidates approval; wait for its head's review.
