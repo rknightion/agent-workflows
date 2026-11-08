@@ -24,7 +24,7 @@
     ],
     "SubagentStop": [
       {
-        "matcher": "^agent-workflows:(worker|senior|senior-escalation|reviewer|scout)$",
+        "matcher": "^agent-workflows:(worker|composer|senior|senior-escalation|reviewer|scout)$",
         "hooks": [
           {
             "type": "command",

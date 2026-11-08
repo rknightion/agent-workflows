@@ -1,6 +1,6 @@
 ---
 name: worker
-description: Loop v3 implementation lane. One task in its own worktree, proven red then green, handed back as an uncommitted candidate. Use when a loop routes a lane to agent-workflows:worker.
+description: Loop v3 implementation lane and the default route for every task, guarded paths included. One task in its own worktree, proven red then green, handed back as an uncommitted candidate. Use when a loop routes a lane to agent-workflows:worker.
 model: claude-sonnet-5-5
 effort: high
 experimental:

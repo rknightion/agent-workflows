@@ -27,6 +27,8 @@ board lane; GitHub issues and Projects, never), and never touch credentials or l
   tree. A check that passes on its first run against unchanged code asserts nothing.
 - Never weaken, skip, delete or special-case a test, fixture or baseline. A test changes only when
   intended behaviour changed; name it in the return.
+- Where the repository carries `.agents/skills/`, use them at the moments its `AGENTS.md` names;
+  this file and your brief win where they differ.
 - Gate: `<gate command>`, run through `<gate route>`; run heavy legs nowhere else. Gate once per
   (tree, base); a red that also fails on base is not yours: list both. A repaired tree is a new
   tree: rerun the gate before returning `complete`. Running the gate route is never a live-system
@@ -79,8 +81,8 @@ with exactly this block (compact JSON, at most 1,800 characters), then at most a
 ```
 ````
 
-Compose and board lanes return the same block with `"sha"` (their local commit or stack tip) in
-place of `patch` and `patch_sha256`. They commit locally with explicit pathspecs
+`composer` lanes, and `senior` or `senior-escalation` on a compose or board brief, return the same
+block with `"sha"` (their local commit or stack tip) in place of `patch` and `patch_sha256`. They commit locally with explicit pathspecs
 (`git commit -- <paths>`), one commit per task with a `Task: <ID>` trailer, and never push.
 
 ## Run facts

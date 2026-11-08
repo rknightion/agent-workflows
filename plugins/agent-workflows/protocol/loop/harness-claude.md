@@ -37,8 +37,9 @@ The launch file's first line is the command; the message follows it:
 
 | Role | `subagent_type` | Model / effort |
 |---|---|---|
-| implementation (default) | `agent-workflows:worker` | Sonnet 5.5 / high |
-| judgement, unknown cause, seams, compose and board batches | `agent-workflows:senior` | Opus 5.5 / medium |
+| implementation (default), guarded paths included | `agent-workflows:worker` | Sonnet 5.5 / high |
+| compose, landing and board batches | `agent-workflows:composer` | Sonnet 5.5 / high |
+| senior starts (contract section 3), escalated worker or composer failures | `agent-workflows:senior` | Opus 5.5 / medium |
 | escalation (tripwire or owner-named) | `agent-workflows:senior-escalation` | Opus 5.5 / xhigh |
 | review and security review | `agent-workflows:reviewer` | Opus 5.5 / high |
 | read-only mapping, sweeps, wave drafts, log reduction | `agent-workflows:scout` | Sonnet 5.5 / medium |

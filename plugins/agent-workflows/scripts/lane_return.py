@@ -2,7 +2,7 @@
 """SubagentStop hook: send a lane back when its lane-return block does not check out.
 
 Plugin-agent frontmatter hooks are ignored by Claude, so the manifest registers this script as a
-global SubagentStop hook. It acts only on a nonempty agent_id with one of five exact qualified
+global SubagentStop hook. It acts only on a nonempty agent_id with one of six exact qualified
 agent-workflows types; roots, unrelated agents and empty-type forks are no-ops. Repeated stops
 still validate, but Claude's native consecutive-stop-block cap (default 8) can end a lane despite
 later block requests. No transcript scan, command execution or state write occurs. Lane commands
@@ -22,7 +22,7 @@ BLOCK = re.compile(r"^```lane-return[ \t]*\r?\n(.*?)\r?\n```[ \t]*\r?$", re.M | 
 SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
 HASH = re.compile(r"[0-9a-fA-F]{64}\Z")
 ROLES = {"agent-workflows:" + role: role for role in
-         ("worker", "senior", "senior-escalation", "reviewer", "scout")}
+         ("worker", "composer", "senior", "senior-escalation", "reviewer", "scout")}
 MAX_RETURN_UNITS = 1800
 MAX_MESSAGE_CHARS = 65536
 MAX_JSON_DEPTH = 32
@@ -126,8 +126,8 @@ def return_error(payload, role):
         if not isinstance(review.get("evidence"), str) or not Path(review["evidence"]).is_absolute():
             return "review evidence must be an absolute artifact path"
     if "sha" in value:
-        if role not in ("senior", "senior-escalation"):
-            return "sha handbacks are only for senior compose/board lanes"
+        if role not in ("composer", "senior", "senior-escalation"):
+            return "sha handbacks are only for composer, senior and senior-escalation compose/board lanes"
         if "patch" in value or "patch_sha256" in value:
             return "sha replaces patch and patch_sha256; do not supply both forms"
         if not isinstance(value["sha"], str) or not SHA.fullmatch(value["sha"]):
@@ -139,7 +139,7 @@ def return_error(payload, role):
     patch, expected = value["patch"], value["patch_sha256"]
     if patch is None and expected is None:
         if value["status"] == "complete" and role not in ("reviewer", "scout"):
-            return "complete implementation needs a patch and patch_sha256 (or senior sha)"
+            return "complete implementation needs a patch and patch_sha256 (or composer or senior sha)"
         return None
     if not isinstance(patch, str) or not Path(patch).is_absolute():
         return "patch must be an absolute file path (or null with a null hash)"

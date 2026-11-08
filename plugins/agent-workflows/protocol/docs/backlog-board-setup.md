@@ -1,18 +1,17 @@
 # Backlog.md board setup and tracker migration
 
-Read this before initialising a Backlog.md board on a repository, or before migrating a repository
-off GitHub Issues or another tracker. It is the single canonical copy. `AGENTS.md` in this repo keeps
-only the short procedure and points here.
+Read this before initialising a Backlog.md board on a repository, working on a repository that
+still runs one, or migrating a repository off GitHub Issues or another tracker onto one. It is the
+single canonical copy. `AGENTS.md` in this repo keeps only the short procedure and points here.
 
-Backlog.md is the default task tracker for GitHub repositories owned by `rknightion`, `m7kni` or
-`example-client-org`. Establish the owner from the remote, not the checkout path. A qualifying
-repository without `backlog/` is not permission to guess the immutable settings: use the question
-round in section 7 when durable tracking is needed, and never fall back silently to GitHub Issues or
-a loose task file.
+**Repositories owned by `rknightion`, `m7kni` or `example-client-org` track work in GitHub issues and a Project:
+the private tracker procedure document is their model and holds the procedure for migrating a board off.** Never
+initialise a new board on one. This page still governs every board that has not migrated yet: a
+repository whose `LOOP.md` has no `tracker: github` key keeps its board, and the rules below hold
+there until its migration lands.
 
-**Owning the tracker does not imply owning the push.** `example-client-org` gets a board but is not on
-the push-to-`main` list, so its setup lands as a branch and a pull request. Check the two lists
-separately.
+No owner takes a new Backlog.md board any more. The agent estate's shared board (section 6) is the
+last board that is not a migrating repository's own.
 
 Verified against **Backlog.md 1.53.0**. Several behaviours below changed in patch releases; check
 `backlog --version` and the relevant `--help` before trusting a trap.
@@ -247,6 +246,9 @@ Point `AGENTS.md` at the pointer and `LOOP.md`, outside the markers:
   during the section 7 question round.
 
 ## 7. Migrating off an existing tracker
+
+Only for a repository whose owner keeps Backlog.md. Never move a `rknightion`, `m7kni` or
+`example-client-org` repository from GitHub issues onto a board.
 
 **Default, without asking: import open work as tasks and closed work as ONE index doc.** Importing
 closed items as `Done` tasks creates a second ID space over the same history (backlog IDs follow

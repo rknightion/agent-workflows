@@ -24,11 +24,12 @@ Codex session and does not change that session's model or reasoning effort.
 
 | Role | `agent_type` | Model / effort |
 |---|---|---|
-| implementation (default) | `worker` | gpt-6.1-sol / medium |
-| judgement, compose, board batches | `senior` | gpt-6.1-sol / high |
+| implementation (default), guarded paths included | `worker` | gpt-6.1-terra / high |
+| compose, landing and board batches | `composer` | gpt-6.1-terra / high |
+| senior starts (contract section 3), escalated worker or composer failures | `senior` | gpt-6.1-sol / high |
 | escalation (tripwire or owner-named) | `senior-escalation` | gpt-6-astra / high |
 | review and security review (read-only sandbox) | `reviewer` | gpt-6.1-sol / high |
-| read-only mapping, sweeps, single waits | `scout` | gpt-6.1-sol / low |
+| read-only mapping, sweeps, single waits | `scout` | gpt-6.1-terra / medium |
 
 - Spawn these by `agent_type` and pass no model or effort. A spawn without a matching installed
   agent is a harness fault: stop and say so.

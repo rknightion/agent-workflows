@@ -32,9 +32,10 @@ Read these each time and never restate them here:
    highest `loop<N>` in `codex/`.
 2. **Read the board.** `backlog task list --plain` and the owner's stated aim. Rank ready work by the
    owner's priorities; exclude and name any task that needs an owner choice nobody has made.
-3. **First wave.** Up to about 20 rows of task, scope and route. `worker` is the default; `senior`
-   only with its reason (unknown cause, frozen seam, data-model call, composing a batch); `scout` for
-   read-only mapping and sweeps. Many small file-disjoint tasks; note an overlap, do not hold work
+3. **First wave.** Up to about 20 rows of task, scope and route. `worker` is the default, guarded paths
+   included; `senior` only for a shared-contract freeze, an unknown cause, a security or privacy call
+   or a design return, with the `Why:` naming which; `composer` for compose, landing and board lanes;
+   `scout` for read-only mapping and sweeps. Many small file-disjoint tasks; note an overlap, do not hold work
    back for it. Pre-assign migration numbers and registry ids.
 4. **Decisions.** Put every owner choice the first wave needs in ONE batched `AskUserQuestion`, each
    with your recommendation and alternatives. Freeze the answers under `## Decisions already made`.

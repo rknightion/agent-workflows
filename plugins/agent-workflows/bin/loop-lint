@@ -7,12 +7,12 @@ a `## First wave` table, at most 8 KB, and a `standing:` file that exists with t
 `queue` reads task IDs from the ready rows of a QUEUE.md and fails any ID in the charter's `exclude:`
 list, any Done task and any task carrying an excluded label. Ready rows are the table rows and list items
 under a `## Ready` heading, or, with no such heading, every row outside the Hold, Landing and Done
-sections; the first task ID of a row is the row's task. `needs-owner` is always an excluded label. Each ID
+sections; the first task ID of a row is the row's task. `needs-owner` and `needs-triage` are always excluded labels. Each ID
 is read with `backlog task view <id> --plain` in the repository that owns the charter (the parent of its
 `codex/` directory, or --repo). When that repository's LOOP.md declares `tracker: github`, a row's item is
 its first `#N` instead, read with `gh issue view N -R <origin owner/repo>`; a closed issue fails as Done
 does, and a ready row naming only a board task ID fails.
-`loopmd` checks a repository's LOOP.md.
+`loopmd` checks a repository's LOOP.md; `tracker: github` there needs `landing: pr` and a `## Queue` section.
 
 Messages are `<rule> <path>:<line> <text>`; an informational line carries `info:` (or `warning:`)
 after the location and never fails the run. Exit 1 on any error, 2 on a usage error.
@@ -53,7 +53,7 @@ TASK_ID = re.compile(r'(?<![\w-])[A-Z][A-Z0-9]*-\d+(?:\.\d+)*(?![\w-])')
 ISSUE_REF = re.compile(r'(?<![\w/#])#(\d+)(?![\w-])')
 TRACKERS = ('backlog', 'github')
 EXCLUDE_LABEL = re.compile(r'label:\s*([^\s,;()]+)')
-ALWAYS_EXCLUDED_LABELS = ('needs-owner',)
+ALWAYS_EXCLUDED_LABELS = ('needs-owner', 'needs-triage')
 NOT_READY_SECTION = re.compile(r'^(?:hold|held|park|landing|landed|done|blocked)', re.IGNORECASE)
 LIST_ITEM = re.compile(r'^\s*(?:[-*+]|\d+[.)])\s+')
 
@@ -357,6 +357,18 @@ def lint_loopmd(path, offline, repo_arg=None):
     need('ci-required', lambda v: bool(v), 'required check names, or none')
     if 'tracker' in keys:
         need('tracker', lambda v: v in TRACKERS, ' | '.join(TRACKERS))
+        queue = h2_sections(text).get('Queue')
+        lines = text.splitlines()
+        body = '\n'.join(lines[queue[0] - 1:queue[1]]) if queue else ''
+        # The body names the queue command (inline code or a fenced block) and says only the root writes.
+        if keys['tracker'] == 'github' and (
+                not re.search(r'`[^`\n]+`|^\s*(```|~~~)', body, re.M)
+                or not re.search(r'\bonly the root\b|\broot-only\b', body, re.I)):
+            report.error('L2', where['tracker'], '`tracker: github` needs a `## Queue` section with a body naming '
+                                                 'the queue command and the root-only writes')
+        if keys['tracker'] == 'github' and keys.get('landing') != 'pr':
+            report.error('L2', where['tracker'], '`tracker: github` needs `landing: pr`: every change to such a '
+                                                 'repository lands by pull request')
     if 'reviewer' in keys:
         need('reviewer', lambda v: v in ('coderabbit', 'copilot', 'kodus'), 'coderabbit | copilot | kodus')
     if 'landing' in keys:

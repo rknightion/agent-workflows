@@ -14,7 +14,7 @@ import unittest
 
 HERE = Path(__file__).resolve().parent
 PLUGIN = HERE.parent if (HERE.parent / "agents").is_dir() else HERE.parent / "plugins/agent-workflows"
-ROLES = ("worker", "senior", "senior-escalation", "reviewer", "scout")
+ROLES = ("worker", "composer", "senior", "senior-escalation", "reviewer", "scout")
 SCRIPT = "scripts/lane_return.py"
 
 
@@ -100,7 +100,10 @@ class LaneReturnHook(unittest.TestCase):
                                                 "patch": None, "patch_sha256": None}, role), {})
         self.assertEqual(self.stop({**self.good, "patch": None, "patch_sha256": None}, "reviewer"), {})
         committed = {k: v for k, v in self.good.items() if k not in ("patch", "patch_sha256")}
-        self.assertEqual(self.stop({**committed, "sha": "b" * 40}, "senior"), {})
+        for role in ("composer", "senior", "senior-escalation"):
+            self.assertEqual(self.stop({**committed, "sha": "b" * 40}, role), {})
+        for role in ("worker", "reviewer", "scout"):
+            self.assertBlocked(self.stop({**committed, "sha": "b" * 40}, role), "sha handbacks are only for")
         crlf = "```lane-return\r\n" + json.dumps(self.good) + "\r\n```\r\nDone.\r\n"
         self.assertEqual(self.stop(crlf), {})
         self.assertEqual(self.stop({**self.good, "coderabbit": None}), {})  # a run prepared before the field left

@@ -10,8 +10,8 @@ Read by the `loop` skill only. Preparing a run should take minutes, not an hour.
    --plain`, or for `tracker: github` the queue command in `LOOP.md`'s `## Queue`; then the owner's
    stated aim. Rank ready work by the
    owner's priorities. Exclude tasks that need an owner choice nobody has made, and say which.
-4. **First wave.** Up to about 20 rows: task, scope (files), route (`worker`, or `senior` with the
-   reason), and any pre-assigned migration number or dependency. Prefer many small file-disjoint
+4. **First wave.** Up to about 20 rows: task, scope (files), route (`worker`, `composer` for a compose or board
+   batch, or `senior` for one of the four contract section 3 starts, named), and any pre-assigned migration number or dependency. Prefer many small file-disjoint
    tasks. Do not hold back work because two tasks share a file; note the overlap instead. Landing is
    continuous (contract section 6); name tasks that must land together under
    `## Decisions already made`.

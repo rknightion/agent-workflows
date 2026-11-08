@@ -36,8 +36,8 @@ by a `DECISIONS.md` entry (or an owner-approved addendum beside it).
 - `QUEUE.md` has three sections: `## Ready` (ordered rows, the task ID or `#N` first), `## Hold`
   (task, reason) and `## Landing` (accepted, to land). Live lanes are in `LANES.md`, not here.
 - Before each wave run `loop-lint queue <charter> <QUEUE.md>`: nothing excluded, nothing Done or
-  closed or labelled `needs-owner`. A re-scope of an exclusion needs an owner ruling or a recorded
-  decision citing one.
+  closed or labelled `needs-owner` or `needs-triage`. A re-scope of an exclusion needs an owner
+  ruling or a recorded decision citing one.
 - File new findings in the tracker at once and queue them when they serve the aim.
 - Do not stop for lack of listed rows while ready, unexcluded work remains in priority
   order. Never manufacture work outside the aim.
@@ -51,16 +51,21 @@ by a `DECISIONS.md` entry (or an owner-approved addendum beside it).
 - Lanes run their own gates on the charter's gate route; the root runs only the composed gate
   (section 6). The root never edits files or runs generators in a live lane's worktree: root-owned
   hunks, integration glue and cross-task fixture repairs go into a compose worktree, or to a
-  `senior` compose lane when they are more than a few lines.
+  `composer` lane when they are more than a few lines.
 - The root owns generated and shared integration files (API specs, generated clients, registries)
   and pre-assigns migration numbers and registry ids at dispatch. A lane returns a hunk for them.
 - The root does live reads (databases, logs, provider APIs) and puts the exact cause and response
   shapes in the brief. Lanes stay credential-free and work against fixtures.
-- Routes are in the harness file: `worker` by default; `senior` only when the brief says why
-  (unknown cause, frozen seam or shared contract, data-model call, composing a landing); `scout` for
-  read-only mapping, sweeps, wave drafts and log reduction. A discovery brief names the language
-  server for symbols, `ast-grep` for code shapes and `jg`, scoped to a package, for behaviour
-  questions.
+- Routes are in the harness file. Every task starts on `worker`; `senior` only to freeze a shared
+  contract others build on (seam, interface, data model, migration design; work on a frozen seam or
+  one path's lock order stays `worker`), an unknown cause (no check statable), a security or
+  privacy call (secrets, redaction, authorisation) or a no-code design; `Why:` names which.
+  A guarded tier alone never routes to `senior`. Compose and board lanes go to `composer`;
+  read-only maps, sweeps, wave drafts and logs to `scout`. Discovery briefs name the LSP
+  (symbols), `ast-grep` (code shapes) and package-scoped `jg` (behaviour).
+- Repairs go to the live lane first; on re-route, a `worker` code failure or a `composer` merge
+  question or code failure goes to `senior` with evidence. A gate, host or red-at-base failure
+  is not a code failure: fix, retry or park.
 
 Brief, at most about 2 KB. Keep the first line exactly in this form on every lane: harnesses parse
 it. A lane with no single task writes `Task: none (<purpose>)`. When the task implements a grammar
@@ -75,14 +80,15 @@ or format this contract or the charter fixes, quote that line in `Why:`.
 ## 4. Returns, repairs and acceptance
 
 - A lane hands back an uncommitted candidate in the `lane-return` block `LANE.md` defines.
-  Compose and board lanes commit locally only. **Only the root pushes, on every harness.**
+  `composer`, or `senior` or `senior-escalation` on a compose or board brief, commits locally
+  only. **Only the root pushes, on every harness.**
 - Worker status is not acceptance. Before accepting, read the return, the load-bearing predicate and
   the test diff; check claims against git and the gate output proportionate to risk.
 - Repairs go back to the same live lane (the harness names the call) with the new evidence.
 - **Convergence tripwire.** When a task has had two failed rounds that each opened a new class of
   finding, or four hours have passed since its first dispatch (excluding `PAUSED`
   time and owner waits), stop repairing. Record in `DECISIONS.md` the
-  first that fits, in either owner mode: a named new approach, a split, a `senior` escalation;
+  first that fits, in either owner mode: a named new approach, a split, a `senior-escalation`;
   park with options only when none can progress. A second trip parks it `owner`.
   On privacy, redaction or scrubbing work count failed review rounds, not classes; after the
   second, ask the owner what residual is acceptable before another round.
@@ -114,7 +120,7 @@ or format this contract or the charter fixes, quote that line in `Why:`.
 ## 6. Landing
 
 - Queue accepted candidates in `QUEUE.md` `## Landing` immediately; never wait for siblings.
-  Guarded candidates need reviewer PASS. One landing at a time: root or senior compose lane takes
+  Guarded candidates need reviewer PASS. One landing at a time: root or `composer` lane takes
   everything queued at start using `BATCH<k>.md`, commits each task to its direct branch or PR head with
   `Task: <ID>`, regenerates once and gates the exact tree in CI mode on the charter route. Return
   conflicting/red candidates to their lanes; land the rest. Push the green tree unchanged unless
@@ -146,7 +152,12 @@ or format this contract or the charter fixes, quote that line in `Why:`.
      type, `!` for any break; no `deps`, `WIP`, `DO NOT MERGE`, `release`.
   2. Gate that tree during review. End the body with a fenced `landing-evidence` block: base/head
      SHAs, each leg's command and log path or run link, aliased as above. Edit only that
-     block for each new head.
+     block for each new head; a fix that moves or renames a file the evidence table cites also
+     needs the table edited.
+     For `tracker: github` the body also carries one `Closes #N` line per issue and the
+     `Acceptance evidence` table (the private tracker procedure document); after the merge,
+     `just tracker close <n> --pr <pr>` for each. A PR changing `.github/workflows/` or
+     `.github/actions/` carries `Task: none, <reason>` instead and hands its issues to the owner.
   3. A process watcher waits for the profile's review of the exact head.
   4. Verify untrusted findings. Fix every one that holds in one commit and push; re-gate touched
      legs and return to 3. Answer each verified thread with a reply giving the fix or the evidence,
@@ -161,7 +172,8 @@ or format this contract or the charter fixes, quote that line in `Why:`.
      squash SHA; watch main's CI.
   8. The next landing may build on an unmerged head; merge it only after that head squash-merges.
      If unpushed, `git rebase --onto origin/main <old head>`; if pushed, merge `origin/main`,
-     re-gate and review the new head. Never rebase a pushed branch. Otherwise merge main only on
+     re-gate and review the new head. Run `gh pr merge <n> --disable-auto` before any push to a head
+     that has auto-merge on. Never rebase a pushed branch. Otherwise merge main only on
      conflict or a required up-to-date check. If the earlier PR parks or closes, rebuild from
      main on a new branch.
 

@@ -14,12 +14,13 @@ Everything lives in `plugins/agent-workflows/`.
 
 - `skills/loop/`: the `loop` skill (`/agent-workflows:loop`). It prepares a run: the charter, the
   lane rules and the launch file, linted, for you to launch.
-- `agents/`: the five lane roles, each with its model and effort pinned:
+- `agents/`: the six lane roles, each with its model and effort pinned:
 
   | Agent | Model / effort | Use |
   |---|---|---|
-  | `agent-workflows:worker` | Sonnet 5.5 / high | one task, proven red then green, handed back as a patch |
-  | `agent-workflows:senior` | Opus 5.5 / medium | judgement calls, unknown causes, composing a landing batch |
+  | `agent-workflows:worker` | Sonnet 5.5 / high | the default for every task: proven red then green, handed back as a patch |
+  | `agent-workflows:composer` | Sonnet 5.5 / high | composing a landing batch or a board batch, committed locally |
+  | `agent-workflows:senior` | Opus 5.5 / medium | a shared-contract freeze, an unknown cause, a security or privacy call, a design return, an escalated failure |
   | `agent-workflows:senior-escalation` | Opus 5.5 / xhigh | a task that has already failed review rounds |
   | `agent-workflows:reviewer` | Opus 5.5 / high | read-only review, PASS or FAIL with findings |
   | `agent-workflows:scout` | Sonnet 5.5 / medium | read-only mapping, sweeps and log reduction |
@@ -31,14 +32,14 @@ Everything lives in `plugins/agent-workflows/`.
   operator message is a loop launch ("You are the root" plus one closeout path), never in
   ordinary sessions, and both let the call through on any fault of their own.
 - The plugin also registers a global SubagentStop lane hook, `scripts/lane_return.py`. It
-  requires a nonempty `agent_id` and an exact `agent-workflows:worker`, `agent-workflows:senior`,
+  requires a nonempty `agent_id` and an exact `agent-workflows:worker`, `agent-workflows:composer`, `agent-workflows:senior`,
   `agent-workflows:senior-escalation`, `agent-workflows:reviewer` or `agent-workflows:scout` type.
   Root sessions (including `--agent`), unrelated agents and empty-type forks are no-ops; the
   registration matcher alone is not the authority. Plugin-agent frontmatter hooks are not used.
   It sends a lane back to repair its return when the lane-return block is missing, malformed or
   duplicated, lacks or mistypes a field, names a patch whose sha256 does not match (the reason
   names both hashes, or the unreadable path), or reports `complete` with a nonzero check exit.
-  Honest partial/blocked returns, read-only null patches and senior compose/board commit SHAs
+  Honest partial/blocked returns, read-only null patches and composer, senior and senior-escalation commit SHAs
   remain valid. Return fences are limited to 1,800 UTF-16 units and JSON nesting to 32; decoder
   failures block rather than fail open. The hook writes no state and repeated stops still
   validate, but Claude's native consecutive-stop-block cap (default 8) can end a lane despite
@@ -91,7 +92,7 @@ claude plugin install agent-workflows@rob-knight
 ```
 
 Start a new session (or run `/reload-plugins`). `claude plugin details agent-workflows` should list
-one skill, five agents and the hooks.
+two skills, six agents and the hooks.
 
 ## Prepare a repository
 

@@ -27,7 +27,7 @@ budget:     <optional wall-time end, ISO UTC, or none>
 
 | Task | Scope | Route | Note |
 |---|---|---|---|
-| <ID> (<title>) | <files> | worker or senior (why) | <migration number, dependency, ruling> |
+| <ID> (<title>) | <files> | worker, composer or senior (why) | <migration number, dependency, ruling> |
 
 ## Decisions already made
 

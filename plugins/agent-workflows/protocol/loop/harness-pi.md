@@ -4,7 +4,7 @@ Read at launch with the contract and the charter.
 
 ## Runtime and launch
 
-- Models: codex-lb `gpt-6.1-sol`, `gpt-6-astra` only; the guard blocks model, thinking and
+- Models: `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra` only; the guard blocks model, thinking and
   run-deadline overrides.
 - Launch with the context's loop-pi launcher. The message names the contract, this file, the
   charter, the closeout path and the `Standing:` file with its sha256:
@@ -42,17 +42,18 @@ Read at launch with the contract and the charter.
 
 | Role | Agent | Model / thinking |
 |---|---|---|
-| implementation (default) | `worker` | sol / medium |
-| judgement, compose, board batches | `senior` | sol / high |
+| implementation (default), guarded paths included | `worker` | terra / high |
+| compose, landing and board batches | `composer` | terra / high |
+| senior starts (contract section 3), escalated worker or composer failures | `senior` | sol / high |
 | escalation (tripwire or owner-named) | `senior-escalation` | astra / high |
 | review and security review | `reviewer` | sol / high |
-| read-only mapping, sweeps, wave drafts | `scout` | sol / low |
+| read-only mapping, sweeps, wave drafts | `scout` | terra / medium |
 
 A missing agent is a harness fault: stop and say so.
 
 ## Dispatch and repairs
 
-- Every `worker`, `senior` and `senior-escalation` lane: async
+- Every `worker`, `composer`, `senior` and `senior-escalation` lane: async
   `subagent {agent, task, worktree: true}`, the complete brief as `task`, with
   `Landing: returns candidate` on its own line (the tree is kept only then). loop-pi keeps the tree
   and runs the lane in it, so a bare `loop-gate-lock <name>` gates it (`cd … &&` is refused).
