@@ -128,7 +128,8 @@ For the first and final candidates, require a separate local artifact with:
 - A `PASS`, `FAIL` or `NO_VERDICT` verdict, without unresolved critical/major findings on PASS.
 
 Have the reviewer form its own assessment before reconciling Kodus findings. Preserve both original
-results and an explicit disposition for every finding; disputes require code evidence. Fix valid
+results and an explicit disposition for every finding (a Kodus finding below high takes the group
+disposition under "Triage Kodus findings"); disputes require code evidence. Fix valid
 findings only within the authorized remediation scope. A changed candidate or repair delta needs a
 new independent verdict; Kodus runs follow the review order below. Keep prior evidence and exact
 identity links.
@@ -170,19 +171,23 @@ candidate having no `head`.
 
 ## Triage Kodus findings
 
-The root (outside a loop, the main thread) gives every Kodus finding exactly one disposition with
-code evidence. In a loop a lane returns Kodus findings untriaged; the root triages them and names
-any fix in the repair round.
+The root (outside a loop, the main thread) gives every Kodus `critical`, `high`, `major` or `error`
+finding exactly one disposition with code evidence, and files every other severity as one group.
+In a loop a lane returns Kodus findings untriaged; the root triages them and names any fix in the
+repair round.
 
 - Kodus `critical`, `high`, `major` and `error` findings are fix candidates. **Fix** one only when
   the code shows a real defect: reachable with an input or environment the brief's intent
   supports, and causing wrong behaviour, data loss, a security exposure or a missed acceptance
   criterion. For a security exposure, input from any party the change exposes it to always counts
   as supported, whatever the brief says.
-- **Follow-up or decline** everything else: every other severity, and hardening against malformed
+- **Follow-up or decline** a fix candidate that is not such a defect: hardening against malformed
   local state, unsupported platforms, odd encodings, concurrent manual changes or same-second
-  timing that the brief does not name. Record them on one follow-up task, or decline each with the
+  timing that the brief does not name. Record it on the follow-up task, or decline it with the
   evidence that it is unreachable or wrong.
+- **Batch** every other severity. List a run's medium and lower findings once, as a group, on the
+  same follow-up task: no investigation and no per-finding evidence. That listing is their
+  disposition. A hosted severity filter does not reach a local run's results, so expect them.
 - This bar applies to Kodus findings only. The independent reviewer's findings keep their own
   severities and are never narrowed by it.
 - A fix from the first run goes into the first repair round, with the independent review's
@@ -229,8 +234,9 @@ identity. Bind the Kodus verdict to what Kodus received: `submitted.patch` must 
 `notified_paths`) to `files_sha256`, and the result's `filesAnalyzed` must
 equal the length of `submitted_paths` plus `notified_paths`; every changed path must appear once in `dispositions`. The combined gate passes when the independent
 verdict on the head to land is PASS and the Kodus component is settled. In the product tier each
-due run either completed with every finding dispositioned (a fixed finding names its independent
-delta review; a follow-up names its task; a declined one carries its evidence), or was `SKIPPED`
+due run either completed with every fix candidate dispositioned (a fixed finding names its
+independent delta review; a follow-up names its task; a declined one carries its evidence) and the
+other severities listed as a group on the follow-up task, or was `SKIPPED`
 for all-changed-paths-ignored, or is recorded unavailable after one retry. In the tooling tier the
 advisory run never blocks: record its state and the dispositions made so far; for a hosted advisory
 run record the pull request and head instead of an adapter artifact, and `kodus-review verify` does
