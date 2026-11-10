@@ -1095,7 +1095,7 @@ def review(candidate, patch, audit, persist):
             or [f['path'] for f in files[:sent_count]] != candidate['submitted_paths']
             or [f['path'] for f in files[sent_count:]] != candidate['notified_paths']):
         raise Refusal('Structured request differs from captured submitted patch and notices')
-    body=request_body(candidate, files_bytes, patch)
+    body=request_body(candidate, files_bytes, patch, audit.get('fast') is True)
     audit['request_sha256']=digest(body);audit['request_bytes']=len(body)
     persist()
     queued=request('/cli/review', body)
@@ -1140,8 +1140,11 @@ def review(candidate, patch, audit, persist):
     return {**audit, 'verdict':'FAIL' if blocking else 'PASS', 'context':'partial-or-unknown',
             'job_id':job, 'result':result}, 1 if blocking else 0
 
-def request_body(candidate, files_bytes, patch):
-    return encoded({'diff':patch.decode(), 'config':{'files':json.loads(files_bytes)},
+def request_body(candidate, files_bytes, patch, fast=False):
+    config={'files':json.loads(files_bytes)}
+    if fast:
+        config['fast']=True
+    return encoded({'diff':patch.decode(), 'config':config,
                     'gitRemote':'https://github.com/'+candidate['repository']+'.git',
                     'mergeBaseSha':candidate['base'], 'commitSha':candidate['head'] or candidate['base'],
                     'cliVersion':'kodus-review/'+VERSION})
@@ -1279,6 +1282,9 @@ def verify(evidence_path, repo):
         found = snapshot_files(layout[key])
         if found != {e['path']: e['sha256'] for e in entries}:
             raise Refusal('Snapshot files differ from the recomputed manifest: ' + layout[key].name)
+    fast = kodus.get('fast', False)
+    if not isinstance(fast, bool):
+        raise Refusal('Evidence kodus.fast is not a boolean')
     verdict = kodus.get('verdict')
     if verdict == 'SKIPPED':
         if not fresh['all_changed_paths_ignored'] or kodus.get('skip_reason') != SKIP_ALL_IGNORED:
@@ -1286,7 +1292,7 @@ def verify(evidence_path, repo):
     elif verdict in ('PASS', 'FAIL'):
         if fresh['all_changed_paths_ignored']:
             raise Refusal('A Kodus verdict on a candidate that must be SKIPPED')
-        if kodus.get('request_sha256') != digest(request_body(candidate, files_bytes, patch)):
+        if kodus.get('request_sha256') != digest(request_body(candidate, files_bytes, patch, fast)):
             raise Refusal('Recorded request differs from the recomputed submission')
         # The stored result is the lane's copy: fetch the job from Kodus and require it to match.
         # Always the launcher-pinned endpoint and token; evidence never chooses them. A capture made
@@ -1316,7 +1322,7 @@ def verify(evidence_path, repo):
         raise Refusal('Evidence has no Kodus verdict to verify')
     return {'verdict':'VERIFIED', 'kodus_verdict':verdict, 'repository':name, 'base':base, 'head':head,
             'tree':tree, 'base_tree':fresh['base_tree'], 'job_id':kodus.get('job_id'),
-            'submitted_paths':fresh['submitted_paths'], 'evidence_sha256':digest(evidence_bytes)}
+            'submitted_paths':fresh['submitted_paths'], 'fast':fast, 'evidence_sha256':digest(evidence_bytes)}
 
 def verify_main(argv):
     parser=argparse.ArgumentParser(prog='kodus-review verify', description='Recompute and check a review result.')
@@ -1344,9 +1350,12 @@ def main():
     parser.add_argument('--out',type=Path,required=True)
     # Not argparse-required: a missing document must still leave a refusal in the evidence.
     parser.add_argument('--ignores',type=Path)
+    parser.add_argument('--fast',action='store_true')
     args=parser.parse_args()
     evidence={'schema_version':2, 'candidate':None, 'kodus':{'verdict':'NO_VERDICT','context':'partial-or-unknown'},
               'local_review_required':True, 'overall_verdict':'PENDING'}
+    if args.fast:
+        evidence['kodus']['fast']=True
     out=args.out.absolute(); directory=Path(str(out)+'.artifacts')
     # Exclusive reservation prevents a retry from replacing earlier review evidence.
     try:
@@ -1391,7 +1400,8 @@ def main():
         if candidate['all_changed_paths_ignored']:
             # Nothing in Kodus scope: no token read and no request. The local review still
             # receives the full candidate patch and snapshots.
-            evidence['kodus']={'verdict':'SKIPPED','skip_reason':SKIP_ALL_IGNORED,'context':'partial-or-unknown'}
+            evidence['kodus']={'verdict':'SKIPPED','skip_reason':SKIP_ALL_IGNORED,'context':'partial-or-unknown',
+                               **({'fast':True} if args.fast else {})}
             code=0
         else:
             evidence['kodus'],code=review(candidate,patch,evidence['kodus'],persist)
@@ -1415,6 +1425,7 @@ def main():
         # Keep the evidence verifiable-in-size: drop the bulky payloads and give no verdict.
         code=2
         evidence['kodus']={'verdict':'NO_VERDICT','context':'partial-or-unknown','job_id':evidence['kodus'].get('job_id'),
+                           **({'fast':True} if args.fast else {}),
                            'error':'Evidence exceeds its %d-byte bound; no review verdict' % MAX_EVIDENCE_BYTES}
         evidence['overall_verdict']='PENDING'
     persist();os.fchmod(stream.fileno(),0o400)

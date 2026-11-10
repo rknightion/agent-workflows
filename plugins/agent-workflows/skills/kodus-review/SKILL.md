@@ -34,7 +34,8 @@ private rules or linked intent into a public repository, public finding or publi
 private central material in private local evidence. This local rules path applies even when Kodus
 has no native repository integration: a shared team key does not prove server-side repository rule
 application, hosted parity or a separate workspace. Hosted review is supplementary to this local
-combined gate and its activation proof is independent.
+combined gate and its activation proof is independent; the one exception is the tooling tier's
+advisory run under "Review order".
 
 ## Render the repository scope
 
@@ -83,7 +84,8 @@ Read the adapter result, not just its process exit. `kodus.verdict` is `PASS`, `
 or `SKIPPED`;
 `kodus.context` is `partial-or-unknown`. The adapter's `overall_verdict` remains `PENDING` or `FAIL`,
 and `local_review_required` is true. Adapter exit 0 means only that its Kodus component passed.
-Native Kodus CLI exit 0 alone proves neither completion nor a passing review.
+Native Kodus CLI exit 0 alone proves neither completion nor a passing review. A Kodus `FAIL` is a
+set of findings to triage (below), not a failed gate, and never a reason to run Kodus again.
 
 `SKIPPED` (with `skip_reason: all-changed-paths-ignored`, exit 0) means every changed path matched
 the bound ignores, so nothing was sent and no token was read. It is not a Kodus PASS: record the
@@ -93,6 +95,12 @@ gate alone. Any other skip, or a skip whose `submitted_paths` is not empty, is n
 Kodus must return an authenticated completed review. Retain the job identity, raw result, findings
 and failure evidence. Authentication errors, quota exhaustion, trial fallback, skipped/partial jobs,
 malformed results or unknown result semantics are no verdict. Never silently substitute a route.
+Retry a product-tier run that gives no verdict once, on a fresh output path; the retry does not
+count toward the two runs. If the retry gives none either, that run is unavailable: the combined
+evidence records both attempts and their errors. After an unavailable first run, the final run is
+due only if the candidate changes. When the run on the head to land is unavailable, the independent
+PASS alone decides the gate, and its verdict binds the head by Git identity as in the tooling tier.
+Never substitute another provider or key.
 The service does not attest unchanged-file/sandbox availability or model routing; record those
 limitations without inventing proof. The brief is retained locally, not transmitted to Kodus.
 
@@ -111,17 +119,83 @@ database at the recorded `tree` and `base_tree` if it needs them. It traces
 relevant callers, contracts and tests, and records what it actually inspected; availability does
 not claim that every file was read. Missing required context means `NO_VERDICT` for that component.
 
-Require a separate local artifact with:
+For the first and final candidates, require a separate local artifact with:
 
-- The adapter's complete candidate identity and independently checked content hashes.
+- The adapter's complete candidate identity and independently checked content hashes (the Git
+  identity instead where the review order below says there is no adapter run to bind).
 - Reviewer identity, actual inspected scope, intent considered and context limitations.
 - Findings with severity, concrete evidence and a disposition for every finding.
 - A `PASS`, `FAIL` or `NO_VERDICT` verdict, without unresolved critical/major findings on PASS.
 
 Have the reviewer form its own assessment before reconciling Kodus findings. Preserve both original
 results and an explicit disposition for every finding; disputes require code evidence. Fix valid
-findings only within the authorized remediation scope. Changed candidates or repair deltas require
-new evidence from both components; keep prior evidence and exact identity links.
+findings only within the authorized remediation scope. A changed candidate or repair delta needs a
+new independent verdict; Kodus runs follow the review order below. Keep prior evidence and exact
+identity links.
+
+## Review order
+
+Kodus is a source of findings, not a pass/fail gate. It reports something new on almost every run,
+so a candidate is never repaired and re-run until Kodus passes. The independent agent review covers
+the first candidate and each repair delta, and its PASS on the head to land decides the gate.
+
+The context's review policy assigns each repository a tier; read it there, never guess it.
+
+- **Product tier.** Kodus reviews the first candidate and, when the candidate has changed since,
+  the final candidate. Two runs at most; one when the first candidate lands unchanged.
+- **Tooling tier.** One advisory Kodus run on the first candidate, with no final run and no
+  retry. It never blocks landing: triage what has arrived by the independent PASS on the head to
+  land; triage what arrives later fix-forward or to the follow-up task. Where the repository lands
+  by pull request and the hosted Kodus review runs on that pull request, the hosted review is the
+  advisory run: make no local Kodus run, do not wait for it before merging, and triage its
+  comments when they arrive. Otherwise the one local run passes `--fast`. A product-tier run never
+  passes `--fast`.
+
+Start each Kodus run in the background beside the independent review; never wait on it idle. Each
+repair delta gets one independent review and no Kodus run of its own; that review binds the
+candidate by base, head or worktree tree and full-patch hash taken from Git, and needs no adapter
+artifacts.
+
+The final candidate is the exact tree the root intends to land, after an independent PASS with no
+unresolved critical/major. In a composed batch it is the task's own commit range on the composed
+tree. In a loop the root runs the product tier's final Kodus run and its independent review; lanes
+run the first-candidate review and the repair-delta reviews. The final independent verdict must
+carry the final adapter's complete candidate identity (including repository, base, head, tree,
+`candidate.patch`, brief, ignores, scope and both manifest hashes); an earlier verdict that does
+not match all of it is rerun on the final artifacts. In the tooling tier, which has no final
+adapter run, it binds the landing head by repository, base, head or tree and full-patch hash from
+Git. The first candidate lands unchanged when the landed commit sits on the recorded base with the
+same `tree` and `candidate.patch` hash; its reviews are then the final ones, despite the worktree
+candidate having no `head`.
+
+## Triage Kodus findings
+
+The root (outside a loop, the main thread) gives every Kodus finding exactly one disposition with
+code evidence. In a loop a lane returns Kodus findings untriaged; the root triages them and names
+any fix in the repair round.
+
+- Kodus `critical`, `high`, `major` and `error` findings are fix candidates. **Fix** one only when
+  the code shows a real defect: reachable with an input or environment the brief's intent
+  supports, and causing wrong behaviour, data loss, a security exposure or a missed acceptance
+  criterion. For a security exposure, input from any party the change exposes it to always counts
+  as supported, whatever the brief says.
+- **Follow-up or decline** everything else: every other severity, and hardening against malformed
+  local state, unsupported platforms, odd encodings, concurrent manual changes or same-second
+  timing that the brief does not name. Record them on one follow-up task, or decline each with the
+  evidence that it is unreachable or wrong.
+- This bar applies to Kodus findings only. The independent reviewer's findings keep their own
+  severities and are never narrowed by it.
+- A fix from the first run goes into the first repair round, with the independent review's
+  findings. A fix from the final run gets one independent delta review and then lands.
+- Nothing earns a third counted Kodus run (a no-verdict retry is not counted), and nothing after
+  the final run earns another: not a fix, a rebase, a renumber or a compose. Changed content after
+  the final run gets an independent delta review of that change instead.
+- Independent-review minors: fix the first candidate's in the same round as its majors; send
+  repair-round minors to the follow-up task.
+
+A repair round that fixes a confirmed Kodus finding counts like any other failed round for the
+convergence tripwire. State the inputs, environments and platforms the change must support and its
+non-goals in the sanitized intent brief, so the triage has a written definition of reachable.
 
 ## Combine evidence before landing
 
@@ -142,8 +216,10 @@ it re-fetches the Kodus job and requires the stored result to be identical and `
 equal to the submitted paths plus the notified paths (the `createdAt` against `captured_at` check binds only unedited
 evidence, since the capture writes `captured_at`; it is no freshness guarantee); a network or authentication failure
 is no verdict. Exit 0 with `"verdict": "VERIFIED"` is required; any mismatch or error is no verdict.
-Take `base`, `head` and `tree` from verify's output, and require `ignores_commit` to equal the
-brief's pinned rules commit. Kodus does not echo the request it reviewed, so verify cannot prove the
+Take `base`, `head`, `tree` and `fast` from verify's output, and require `ignores_commit` to equal
+the brief's pinned rules commit. A product-tier PASS or FAIL whose verified `fast` is true does not
+count as that tier's run: it is no verdict for the gate, and the run made again without `--fast` is
+that run's one retry. A `SKIPPED` run sent nothing, so its mode does not matter. Kodus does not echo the request it reviewed, so verify cannot prove the
 job reviewed this exact submission; that residual is why the independent review stays mandatory.
 
 The root reads both artifacts and verifies matching repository, base/head, tree, patch, brief,
@@ -151,13 +227,20 @@ ignores, scope and candidate and base manifest hashes, artifact integrity, and c
 identity. Bind the Kodus verdict to what Kodus received: `submitted.patch` must hash to
 `submitted_patch_sha256`, `files.json` (sent diffs plus one content-free notice per withheld path,
 `notified_paths`) to `files_sha256`, and the result's `filesAnalyzed` must
-equal the length of `submitted_paths` plus `notified_paths`; every changed path must appear once in `dispositions`. Both components must PASS, except that a Kodus `SKIPPED` for all-changed-paths-ignored
-leaves the independent PASS as the deciding verdict; FAIL, NO_VERDICT, missing evidence or an
-identity mismatch blocks the combined gate. Neither review
-substitutes for the other. Preserve Kodus context limitations even when the combined gate passes.
+equal the length of `submitted_paths` plus `notified_paths`; every changed path must appear once in `dispositions`. The combined gate passes when the independent
+verdict on the head to land is PASS and the Kodus component is settled. In the product tier each
+due run either completed with every finding dispositioned (a fixed finding names its independent
+delta review; a follow-up names its task; a declined one carries its evidence), or was `SKIPPED`
+for all-changed-paths-ignored, or is recorded unavailable after one retry. In the tooling tier the
+advisory run never blocks: record its state and the dispositions made so far; for a hosted advisory
+run record the pull request and head instead of an adapter artifact, and `kodus-review verify` does
+not apply. An independent FAIL
+or NO_VERDICT, missing evidence, an identity mismatch, or a product-tier Kodus fix candidate with
+no disposition blocks the combined gate. A Kodus `FAIL` verdict alone does not. The independent
+review is never waived. Preserve Kodus context limitations even when the combined gate passes.
 
 Write a fresh combined evidence artifact containing both artifact paths and hashes, candidate
-identity, all finding dispositions and the combined verdict. Point the lane-return `review.evidence`
+identity, the tier, the Kodus run count, all finding dispositions and the combined verdict. Point the lane-return `review.evidence`
 to its absolute path and name both providers in `review.provider`. An adapter result alone cannot
 serve as combined PASS evidence. Never imply local review grants a required human GitHub approval
-or permits bypassing required checks. Guarded work completes both reviews before landing.
+or permits bypassing required checks. Guarded work completes its reviews and triage before landing.

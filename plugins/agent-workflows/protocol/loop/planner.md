@@ -7,12 +7,18 @@ Read by the `loop` skill only. Preparing a run should take minutes, not an hour.
    (a dry run) and put anything it would remove in the owner prompt.
 2. **Pick the number.** N is one more than the highest `loop<N>` in this repository's `codex/`.
 3. **Read the tracker.** `LOOP.md`'s `tracker:` (absent means `backlog`) picks it: `backlog task list
-   --plain`, or for `tracker: github` the queue command in `LOOP.md`'s `## Queue`; then the owner's
-   stated aim. Rank ready work by the
+   --plain`, or for `tracker: github` the queue command in `LOOP.md`'s `## Queue`. A repository whose
+   issues live in another repository (`tracker-repo:` in `LOOP.md`, or in the charter for a boardless
+   repository with no `tracker:` key) is `tracker: github`: read that repository's open issues with its
+   label, `gh issue list -R OWNER/REPO --label <repo>`, and put the same `tracker-repo:` in the
+   charter. Then the owner's stated aim. Rank ready work by the
    owner's priorities. Exclude tasks that need an owner choice nobody has made, and say which.
 4. **First wave.** Up to about 20 rows: task, scope (files), route (`worker`, `composer` for a compose or board
    batch, or `senior` for one of the four contract section 3 starts, named), and any pre-assigned migration number or dependency. Prefer many small file-disjoint
-   tasks. Do not hold back work because two tasks share a file; note the overlap instead. Landing is
+   tasks: split one whose candidate patch would pass about 30 KB into slices that each land alone, because
+   review findings and repair rounds grow with patch size. In each row's note, state the inputs and
+   environments the change must support and its non-goals; the root copies them into the brief's `Why:`
+   and tests review findings against them. Do not hold back work because two tasks share a file; note the overlap instead. Landing is
    continuous (contract section 6); name tasks that must land together under
    `## Decisions already made`.
 5. **Front-load decisions.** Batch every owner choice the first wave needs into one prompt now and
@@ -28,7 +34,8 @@ Read by the `loop` skill only. Preparing a run should take minutes, not an hour.
    **Review and landing.** Read `landing:` from `LOOP.md` (absent means `direct`). Resolve
    the local review command(s) from the enrolled context and repository contract, including exact
    repository scope, provider/key route, executor, candidate/base binding and failure policy. Freeze
-   them in `LANE.md`. Where central rules apply, freeze their source commit, selected rule IDs and
+   them in `LANE.md`, with the policy's review order, tier rule (the tier can depend on the change, not only the repository), run cap, triage owner and no-verdict rule: which components
+   run on a lane's first candidate, which on repair deltas, and which the root runs on the final candidate. Where central rules apply, freeze their source commit, selected rule IDs and
    rendered-content digest in the sanitized intent brief; the local reviewer verifies that context.
    Never infer hosted rule application from CLI access. Never select a tool from PATH or infer a shared reviewer default. Preserve a
    repository's declared local pair. Missing or conflicting selection blocks activation.

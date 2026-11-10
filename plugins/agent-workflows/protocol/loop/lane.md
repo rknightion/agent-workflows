@@ -36,11 +36,14 @@ board lane; GitHub issues and Projects, never), and never touch credentials or l
 - Local review: `<frozen provider(s), exact command(s), executor and failure policy>`. The planner
   fills this from the enrolled context and repository contract before dispatch; never guess it.
   After writing `candidate.patch`, save your brief verbatim to `<run dir>/<lane>/brief.md` and
-  run the frozen commands against the exact base and patch. If the root owns a repository's pair,
+  run the frozen commands against the exact base and patch, skipping any component `LANE.md` reserves
+  for the root's final-candidate run; a repair delta takes only the review `LANE.md` names for repair
+  rounds. If the root owns a repository's pair,
   return the candidate for its committed-range review instead; do not substitute a lane wrapper.
   Each required component must retain exact candidate identity, available context and its own
   verdict/evidence. A submitted path/hash manifest is not proof the service used the full context.
-  Fix verified critical/major findings, re-prove and review repair deltas. Explain disputed findings
+  Fix verified critical/major findings, re-prove and review repair deltas; where `LANE.md` gives a
+  component's triage to the root, return its findings untriaged instead. Explain disputed findings
   in `return.md`. Missing/incomplete verdicts are not PASS: apply the frozen failure policy without
   provider/key substitution. Guarded security review and local-pair obligations still apply.
   Skip only the categories the context policy allows, recording the reason. Record a named review

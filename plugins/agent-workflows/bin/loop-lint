@@ -14,6 +14,12 @@ its first `#N` instead, read with `gh issue view N -R <origin owner/repo>`; a cl
 does, and a ready row naming only a board task ID fails.
 `loopmd` checks a repository's LOOP.md; `tracker: github` there needs `landing: pr` and a `## Queue` section.
 
+A repository whose issues live in another repository names it `tracker-repo: OWNER/REPO` in LOOP.md (valid
+only with `tracker: github`), in the charter, or as `queue --tracker-repo OWNER/REPO`; the queue check then
+reads that repository's issues instead of origin's. The option beats the charter key, which beats LOOP.md.
+The charter and the option exist so a public repository never commits a private repository's name; with
+either, a LOOP.md that has no `tracker:` key is read as `github`, while an explicit `tracker: backlog` fails.
+
 Messages are `<rule> <path>:<line> <text>`; an informational line carries `info:` (or `warning:`)
 after the location and never fails the run. Exit 1 on any error, 2 on a usage error.
 
@@ -52,6 +58,7 @@ BUDGET_VALUE = re.compile(r'^(?:none|\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?Z)$')
 TASK_ID = re.compile(r'(?<![\w-])[A-Z][A-Z0-9]*-\d+(?:\.\d+)*(?![\w-])')
 ISSUE_REF = re.compile(r'(?<![\w/#])#(\d+)(?![\w-])')
 TRACKERS = ('backlog', 'github')
+TRACKER_REPO = re.compile(r'^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$')
 EXCLUDE_LABEL = re.compile(r'label:\s*([^\s,;()]+)')
 ALWAYS_EXCLUDED_LABELS = ('needs-owner', 'needs-triage')
 NOT_READY_SECTION = re.compile(r'^(?:hold|held|park|landing|landed|done|blocked)', re.IGNORECASE)
@@ -369,6 +376,10 @@ def lint_loopmd(path, offline, repo_arg=None):
         if keys['tracker'] == 'github' and keys.get('landing') != 'pr':
             report.error('L2', where['tracker'], '`tracker: github` needs `landing: pr`: every change to such a '
                                                  'repository lands by pull request')
+    if 'tracker-repo' in keys:
+        need('tracker-repo', lambda v: bool(TRACKER_REPO.fullmatch(v)), 'OWNER/REPO')
+        if keys.get('tracker') != 'github':
+            report.error('L2', where['tracker-repo'], '`tracker-repo:` applies only with `tracker: github`')
     if 'reviewer' in keys:
         need('reviewer', lambda v: v in ('coderabbit', 'copilot', 'kodus'), 'coderabbit | copilot | kodus')
     if 'landing' in keys:
@@ -546,6 +557,8 @@ def lint_charter(path):
             report.error('C3', where[key], f'`{key}:` still holds a template placeholder')
     if keys.get('harness') and keys['harness'] not in HARNESSES:
         report.error('C3', where['harness'], f'invalid `harness:` {keys["harness"]!r} ({" | ".join(HARNESSES)})')
+    if 'tracker-repo' in keys and not TRACKER_REPO.fullmatch(keys['tracker-repo']):
+        report.error('C3', where['tracker-repo'], f'invalid `tracker-repo:` {keys["tracker-repo"]!r}, want OWNER/REPO')
     if keys.get('lanes') and not re.fullmatch(r'[1-9][0-9]*', keys['lanes']):
         report.error('C3', where['lanes'], f'invalid `lanes:` {keys["lanes"]!r}, want a positive integer')
     if keys.get('budget') and not BUDGET_VALUE.match(keys['budget']):
@@ -589,13 +602,17 @@ def charter_exclusions(value):
     return ids, labels | set(ALWAYS_EXCLUDED_LABELS)
 
 
-def repo_tracker(repo):
-    """`backlog` or `github`: the `tracker:` key of the repository's LOOP.md, `backlog` when absent."""
+def repo_loopmd_keys(repo):
+    """The opening keys of the repository's LOOP.md; empty when it has none."""
     path = Path(repo) / 'LOOP.md'
     if not path.exists():
-        return 'backlog'
-    keys, _ = parse_loopmd_keys(path.read_text(encoding='utf-8', errors='replace'))
-    return keys.get('tracker', 'backlog')
+        return {}
+    return parse_loopmd_keys(path.read_text(encoding='utf-8', errors='replace'))[0]
+
+
+def repo_tracker(repo):
+    """`backlog` or `github`: the `tracker:` key of the repository's LOOP.md, `backlog` when absent."""
+    return repo_loopmd_keys(repo).get('tracker', 'backlog')
 
 
 def ready_rows(text, tracker='backlog'):
@@ -657,7 +674,7 @@ def github_issue(slug, ref):
     return str(data.get('state', '')), {str(l.get('name', '')).lower() for l in data.get('labels') or []}
 
 
-def lint_queue(charter_path, queue_path, repo_arg=None):
+def lint_queue(charter_path, queue_path, repo_arg=None, tracker_repo_arg=None):
     report = Report(queue_path)
     charter = read_text(report, charter_path)
     queue = read_text(report, queue_path)
@@ -673,14 +690,29 @@ def lint_queue(charter_path, queue_path, repo_arg=None):
     if charter_report.errors:
         return report
     repo = Path(repo_arg) if repo_arg else Path(charter_path).resolve().parent.parent
-    tracker = repo_tracker(repo)
+    loop_keys = repo_loopmd_keys(repo)
+    tracker = loop_keys.get('tracker', 'backlog')
+    # The option beats the charter key, which beats LOOP.md; none of them falls back to origin when malformed.
+    # Presence, not truthiness: an empty value is malformed, never "unset".
+    outside = tracker_repo_arg if tracker_repo_arg is not None else keys.get('tracker-repo')
+    tracker_repo = outside if outside is not None else loop_keys.get('tracker-repo')
+    if tracker_repo is not None and not TRACKER_REPO.fullmatch(tracker_repo):
+        report.error('Q4', 1, f'invalid tracker-repo {tracker_repo!r}, want OWNER/REPO; nothing was checked')
+        return report
+    if outside is not None and 'tracker' not in loop_keys:
+        tracker = 'github'  # a repository with no tracker key of its own, queued from another repository
+    if tracker_repo is not None and tracker != 'github':
+        named = f'names tracker {tracker!r}' if 'tracker' in loop_keys else 'has no tracker key (read as backlog)'
+        report.error('Q4', 1, f'tracker-repo is set but LOOP.md {named}; it applies only with '
+                              '`tracker: github`; nothing was checked')
+        return report
     if tracker not in TRACKERS:
         report.error('Q4', 1, f'LOOP.md names tracker {tracker!r}, not one of {", ".join(TRACKERS)}; nothing was checked')
         return report
     slug = None
     if tracker == 'github':
         try:
-            slug = origin_slug(repo)
+            slug = tracker_repo or origin_slug(repo)
         except GhError as error:
             report.error('Q4', 1, f'tracker: github, but the issues cannot be located: {error}')
             return report
@@ -719,8 +751,12 @@ def main(argv=None):
     parser.add_argument('kind', choices=('loopmd', 'charter', 'queue'))
     parser.add_argument('paths', nargs='+', help='loopmd: LOOP.md; charter: charter.md; queue: charter.md QUEUE.md')
     parser.add_argument('--offline', action='store_true', help='loopmd only: skip the checks that need gh')
+    parser.add_argument('--tracker-repo', metavar='OWNER/REPO',
+                        help='queue only: read the issues of this repository instead of origin\'s')
     parser.add_argument('--repo', help='repository checkout (default: the parent of the codex/ folder)')
     args = parser.parse_args(argv)
+    if args.tracker_repo is not None and args.kind != 'queue':
+        parser.error('--tracker-repo applies to queue only')
     wanted = 2 if args.kind == 'queue' else 1
     if len(args.paths) != wanted:
         parser.error(f'{args.kind} takes {wanted} path argument(s)')
@@ -731,7 +767,7 @@ def main(argv=None):
     elif args.kind == 'charter':
         report = lint_charter(args.paths[0])
     else:
-        report = lint_queue(args.paths[0], args.paths[1], args.repo)
+        report = lint_queue(args.paths[0], args.paths[1], args.repo, args.tracker_repo)
     return 1 if report.errors else 0
 
 

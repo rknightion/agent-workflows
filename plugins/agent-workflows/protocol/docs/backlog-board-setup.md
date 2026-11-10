@@ -10,8 +10,8 @@ initialise a new board on one. This page still governs every board that has not 
 repository whose `LOOP.md` has no `tracker: github` key keeps its board, and the rules below hold
 there until its migration lands.
 
-No owner takes a new Backlog.md board any more. The agent estate's shared board (section 6) is the
-last board that is not a migrating repository's own.
+No owner takes a new Backlog.md board any more. The agent estate's shared board has moved to GitHub
+issues too (section 6).
 
 Verified against **Backlog.md 1.53.0**. Several behaviours below changed in patch releases; check
 `backlog --version` and the relevant `--help` before trusting a trap.
@@ -193,10 +193,10 @@ exits 2.
   them. A root reads only its charter, the contract and its harness file, by path; a lane reads its brief and
   the run's `LANE.md`.
 
-**Recorded exception: `rknightion/grafana-aio11y-demo` carries no loop pointer.** It is a public
-customer-facing demo whose scrub gate rejected the rendered protocol, and the protocol is internal
-guidance. Its `doc-0001` says so, and it has no `registry.tsv` row. A loop on that repo reads the
-loop files from this checkout. Do not "fix" it by registering the repo.
+**Recorded exception: `rknightion/grafana-cloud-agento11y-demo` (formerly `grafana-aio11y-demo`) never
+carried a loop pointer.** It is a public customer-facing demo whose scrub gate rejected the rendered
+protocol, and it has migrated to GitHub issues, so its `doc-0001` now lives in
+`.github/tracker/history/` and it has no `registry.tsv` row. Do not register the repo.
 
 ### Optional docs and wiring
 

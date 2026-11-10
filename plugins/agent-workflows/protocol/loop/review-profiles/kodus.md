@@ -15,8 +15,8 @@ Until this proof exists, park hosted activation as dependency; do not weaken app
 The planner materializes the proven watcher, review-request action (if authorized), completion,
 approval and thread conditions in the charter. At each head, use those commands and verify the
 returned head identity before interpreting results. Missing, stale, skipped, partial, rate-limited,
-failed or unidentifiable review is not PASS. Verify findings in code, fix every valid blocker and
-request review of the new head. Disputes follow section 6 step 4; never dismiss to pass the gate.
+failed or unidentifiable review is not PASS. Verify findings in code, fix every blocker the code confirms as a real defect and
+request review of the new head; the rest go to a follow-up issue or are answered with evidence. Disputes follow section 6 step 4; never dismiss to pass the gate.
 Resolve only threads demonstrated fixed and only where the frozen grant authorizes that action.
 Re-read every thread page before merge. Required human approval remains required if Kodus does not
 supply an approval accepted by the live rules. Never self-approve, bypass or substitute CLI review

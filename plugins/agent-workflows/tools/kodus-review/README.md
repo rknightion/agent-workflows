@@ -262,6 +262,14 @@ true; `overall_verdict` is PENDING or FAIL. A separate independent agent reviews
 `candidate.patch` and both snapshots with the sanitized intent and writes its own candidate-bound
 artifact; the root checks both before declaring the combined gate passed.
 
+`--fast` (review command only, not `verify`) adds `"fast": true` to the request's `config`, next to
+`config.files`, and records `kodus.fast: true` in the evidence before submission; without it the
+request bytes are unchanged and the field is absent. Everything else sent is identical. `verify`
+takes the mode from the evidence (`kodus.fast` must be a boolean when present) and recomputes the
+request hash under that mode, so evidence whose recorded mode does not reproduce `request_sha256`
+fails. Its report carries `fast` (true or false) so the root can refuse a fast run where the review
+policy requires a normal one.
+
 ## verify
 
 `kodus-review verify --evidence ABS --repo ABS` is for the root, run through the trusted launcher

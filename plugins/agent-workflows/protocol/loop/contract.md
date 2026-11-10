@@ -31,16 +31,17 @@ by a `DECISIONS.md` entry (or an owner-approved addendum beside it).
 ## 2. The queue
 
 - The tracker is the queue: Backlog, or GitHub issues per `LOOP.md`'s `tracker: github` (its
-  `## Queue` names the commands). Start from the charter's first wave, then feed `QUEUE.md` from it
-  in priority order. A scout may draft waves; only the root writes ready rows.
+  `## Queue` names the commands), in origin or in `tracker-repo: OWNER/REPO` (LOOP.md, charter or
+  `loop-lint queue --tracker-repo`). Start from the charter's first wave, then feed `QUEUE.md` in
+  priority order. A scout may draft waves; only the root writes ready rows.
 - `QUEUE.md` has three sections: `## Ready` (ordered rows, the task ID or `#N` first), `## Hold`
   (task, reason) and `## Landing` (accepted, to land). Live lanes are in `LANES.md`, not here.
 - Before each wave run `loop-lint queue <charter> <QUEUE.md>`: nothing excluded, nothing Done or
   closed or labelled `needs-owner` or `needs-triage`. A re-scope of an exclusion needs an owner
   ruling or a recorded decision citing one.
 - File new findings in the tracker at once and queue them when they serve the aim.
-- Do not stop for lack of listed rows while ready, unexcluded work remains in priority
-  order. Never manufacture work outside the aim.
+- Do not stop for lack of listed rows while ready, unexcluded work remains. Never invent
+  work outside the aim.
 
 ## 3. Dispatch
 
@@ -72,7 +73,7 @@ it. A lane with no single task writes `Task: none (<purpose>)`. When the task im
 or format this contract or the charter fixes, quote that line in `Why:`.
 
     Lane: <id> · Task: <ID> (<title>) · Tier: routine|guarded
-    Why: <root evidence: exact cause, shapes, rulings>
+    Why: <root evidence: exact cause, shapes, rulings, supported inputs, non-goals>
     Done when: <observable check; red at base, green on the candidate>
     Scope: <files>   Others live in: <files and lanes>   Root-owned: <files, return the hunk>
     Rules: <abs path to codex/loop<N>/LANE.md>
@@ -103,23 +104,22 @@ or format this contract or the charter fixes, quote that line in `Why:`.
   context availability; an input manifest alone does not prove server-side review completeness.
 - Routine: lane gate and the frozen local review replace the reviewer. Require one when that review has no
   verdict, its major is disputed, or on a second repair round; add one if doubtful. Review landed
-  tasks before closeout; fix forward. An additional reviewer never waives a component required by
-  the frozen context/repository policy; an explicit fallback in that policy is a selected route,
-  not permission to invent a substitute.
+  tasks before closeout; fix forward. An additional reviewer never waives a component the frozen
+  policy requires; only an explicit fallback in it is a selected route.
 - Guarded (section 8): security reviewer PASS before landing and the frozen local review; any blocker
   blocks. Record disagreements in DECISIONS.md.
 - Changed code invalidates a verdict: review the delta only; reviewers never edit. Minor-only
-  repairs explicitly named by the verdict may queue without another review; root checks the patch.
-- The frozen local review reviews final code once; fix critical/major, explain the rest, review repair deltas.
-  No verdict is not PASS. Skip docs/comments/config/dependency bumps, saying so.
-- `review: local-pair` uses the repository's explicitly named pair. Both must cover
+  repairs the verdict names may queue unless its policy bars it; root checks the patch.
+- The frozen local review follows its policy's order, cap and triage; fix confirmed critical/major, explain the rest.
+  No verdict is not PASS unless policy says so. Skip docs/comments/config/dependency bumps.
+- `review: local-pair` uses the repository's declared pair. Both must cover
   the exact range and pass without unresolved critical/major. Missing/incomplete verdicts block.
   Retain base/head, coverage and verdicts; add a Reviewed-by-local trailer. Trailer-only amend
   requires identical trees. Local review never substitutes for hosted approval or required checks.
 
 ## 6. Landing
 
-- Queue accepted candidates in `QUEUE.md` `## Landing` immediately; never wait for siblings.
+- Queue accepted candidates in `QUEUE.md` `## Landing` at once; never wait for siblings.
   Guarded candidates need reviewer PASS. One landing at a time: root or `composer` lane takes
   everything queued at start using `BATCH<k>.md`, commits each task to its direct branch or PR head with
   `Task: <ID>`, regenerates once and gates the exact tree in CI mode on the charter route. Return
@@ -136,18 +136,18 @@ or format this contract or the charter fixes, quote that line in `Why:`.
   Repair a red leg in a new commit and re-gate touched legs. The harness gives the invocation.
 - Gate once per (tree, base). Classify every red against base: one that also fails on base is not
   the candidate's; record both lists. A new failure is red.
-- Hosted CI does not block a direct landing. Watch the landing branch's CI for each pushed SHA with a background watcher
+- Hosted CI does not block a direct landing. Watch each pushed SHA's CI on the landing branch with a background watcher
   and fix forward at once. Revert only on a recorded decision that the breakage blocks all other
   landing, damages data or a live deploy, or has no plausible repair.
 - Merge sibling commits before pushing; never revert foreign work. Commit explicit paths.
 - **Landing mode.** `LOOP.md` selects `landing: direct` (default) or `landing: pr`, and
-  a hosted `reviewer:` profile or `review: local-pair` (never both keys). Resolve a missing
+  a hosted `reviewer:` profile or `review: local-pair` (never both). Resolve a missing
   reviewer through the enrolled context and repository contract; never guess a shared default. Direct mode lands code AND board commits on `landing-branch:` (default main;
   required with local-pair). PR heads are `loop<N>-land<k>` from main; PR-mode board-only commits
   still target main. Read live target rules before every push; unexpected rules stop landing. No
   main merge is implied.
   In `pr`, only the root writes PRs and merges; the squash commit is the landing:
-  1. Run the frozen local review on the batch once, push `loop<N>-land<k>`;
+  1. Run the frozen local review on the batch, push `loop<N>-land<k>`;
      open a ready PR to main at once. Conventional title: highest-precedence release-please
      type, `!` for any break; no `deps`, `WIP`, `DO NOT MERGE`, `release`.
   2. Gate that tree during review. End the body with a fenced `landing-evidence` block: base/head
@@ -160,8 +160,8 @@ or format this contract or the charter fixes, quote that line in `Why:`.
      `.github/actions/` carries `Task: none, <reason>` instead and hands its issues to the owner.
   3. A process watcher waits for the profile's review of the exact head.
   4. Verify untrusted findings. Fix every one that holds in one commit and push; re-gate touched
-     legs and return to 3. Answer each verified thread with a reply giving the fix or the evidence,
-     then resolve it; this is root work and needs a standing grant that names it. Disputes go to `DECISIONS.md` and the owner (overnight: park, `owner`),
+     legs and return to 3. Answer each verified thread with the fix or the evidence,
+     then resolve it; root work, needing a standing grant that names it. Disputes go to `DECISIONS.md` and the owner (overnight: park, `owner`),
      not a round. Never dismiss a finding to pass the gate.
   5. Wait at most about 20 minutes, 3 review rounds per PR; then record and ask the owner
      (overnight: park, `owner`). A new push invalidates approval; wait for its head's review.

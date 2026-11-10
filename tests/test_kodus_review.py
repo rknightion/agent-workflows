@@ -1178,6 +1178,58 @@ class ReviewCLI(unittest.TestCase):
             code,report=self.run_verify(e['evidence_path'],renderer)
             self.assertEqual(code,2);self.assertIn('submitted_patch_path',report['error'])
 
+    def test_fast_flag_changes_only_config_and_is_recorded_in_evidence(self):
+        self.write('a.py','value = 60\n')
+        run,normal=self.run_review();self.assertEqual(run.returncode,0,run.stderr)
+        run,fast=self.run_review(None,'--fast');self.assertEqual(run.returncode,0,run.stderr)
+        self.assertNotIn('fast',self.calls[0][2]['config'])
+        self.assertNotIn('fast',normal['kodus'])
+        self.assertEqual(self.calls[0][2],{**self.calls[2][2],'config':{'files':self.calls[2][2]['config']['files']}})
+        self.assertIs(self.calls[2][2]['config']['fast'],True)
+        self.assertIs(fast['kodus']['fast'],True)
+        self.assertEqual(fast['kodus']['request_sha256'],hashlib.sha256(
+            (json.dumps(self.calls[2][2],sort_keys=True,ensure_ascii=True,indent=2)+'\n').encode()).hexdigest())
+        self.assertNotEqual(fast['kodus']['request_sha256'],normal['kodus']['request_sha256'])
+
+    def test_fast_is_recorded_on_refusal_and_skip_paths(self):
+        run,e=self.run_review({'KODUS_REVIEW_TOKEN_FILE':str(self.root/'missing')},'--fast')
+        self.assertEqual(run.returncode,2);self.assertEqual(e['kodus']['verdict'],'NO_VERDICT')
+        self.assertIs(e['kodus']['fast'],True)
+        self.write('gen/x.lock','l\n')
+        run,e=self.run_review(None,'--fast')
+        self.assertEqual((run.returncode,e['kodus']['verdict']),(0,'SKIPPED'))
+        self.assertIs(e['kodus']['fast'],True)
+        self.assertTrue(run.stdout.endswith('Kodus component: SKIPPED; independent local review required\n'))
+
+    def test_verify_accepts_fast_and_legacy_evidence_and_refuses_a_wrong_mode(self):
+        self.write('a.py','value = 61\n')
+        renderer,_=self.write_renderer(self.ignores.read_bytes())
+        bound={'KODUS_REVIEW_IGNORES_RENDERER':str(renderer)}
+        # The fixture keeps one job whose createdAt each POST overwrites, so each genuine evidence
+        # is verified before the next review runs.
+        run,fast=self.run_review(bound,'--fast');self.assertEqual(run.returncode,0,run.stderr)
+        code,report=self.run_verify(fast['evidence_path'],renderer)
+        self.assertEqual((code,report['verdict'],report['fast']),(0,'VERIFIED',True),report)
+        run,legacy=self.run_review(bound);self.assertEqual(run.returncode,0,run.stderr)
+        code,report=self.run_verify(legacy['evidence_path'],renderer)
+        self.assertEqual((code,report['verdict'],report['fast']),(0,'VERIFIED',False),report)
+        explicit_false=self.forge(legacy['evidence_path'],lambda d:d['kodus'].update(fast=False))
+        code,report=self.run_verify(explicit_false,renderer)
+        self.assertEqual((code,report['verdict']),(0,'VERIFIED'),report)
+        cases={'fast removed':(fast,lambda d:d['kodus'].pop('fast')),
+               'fast false':(fast,lambda d:d['kodus'].update(fast=False)),
+               'fast added':(legacy,lambda d:d['kodus'].update(fast=True))}
+        for label,(e,change) in cases.items():
+            with self.subTest(case=label):
+                code,report=self.run_verify(self.forge(e['evidence_path'],change),renderer)
+                self.assertEqual((code,report['verdict']),(2,'MISMATCH'),report)
+                self.assertIn('request',report['error'])
+        for value in ('true',1,0,None,[]):
+            with self.subTest(case='non-boolean',value=value):
+                code,report=self.run_verify(self.forge(fast['evidence_path'],lambda d:d['kodus'].update(fast=value)),renderer)
+                self.assertEqual((code,report['verdict']),(2,'MISMATCH'),report)
+                self.assertIn('fast',report['error'])
+
     def test_verify_refuses_a_run_bound_to_a_script_renderer(self):
         self.write('a.py','value = 31\n')
         genuine,_=self.write_renderer(self.ignores.read_bytes())

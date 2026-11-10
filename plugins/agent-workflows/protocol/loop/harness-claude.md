@@ -40,12 +40,15 @@ The launch file's first line is the command; the message follows it:
 | implementation (default), guarded paths included | `agent-workflows:worker` | Sonnet 5.5 / high |
 | compose, landing and board batches | `agent-workflows:composer` | Sonnet 5.5 / high |
 | senior starts (contract section 3), escalated worker or composer failures | `agent-workflows:senior` | Opus 5.5 / medium |
-| escalation (tripwire or owner-named) | `agent-workflows:senior-escalation` | Opus 5.5 / xhigh |
+| escalation (tripwire or owner-named) | `agent-workflows:senior-escalation` | Opus 5.5 / xhigh; Personal: Fable 5.2 / medium |
 | review and security review | `agent-workflows:reviewer` | Opus 5.5 / high |
 | read-only mapping, sweeps, wave drafts, log reduction | `agent-workflows:scout` | Sonnet 5.5 / medium |
 
 - Pass no `model` to these agents: it overrides the pin. Give each dispatch a `description` of
   `<lane> <task>`.
+- The one exception: in a Personal run (`AGENT_CONTEXT=personal` in your environment), dispatch
+  `senior-escalation` with `model: "fable"` and `effort: "medium"`; both parameters override the
+  pin. Any other context has no Fable: pass neither there.
 - Every role keeps a one-hour prompt cache, so a lane can wait on a gate slot without rewriting
   its context.
 - If an `agent-workflows:*` type is missing, the plugin is not installed: stop and say so in chat.
