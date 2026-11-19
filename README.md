@@ -29,7 +29,8 @@ Everything lives in `plugins/agent-workflows/`.
 - `hooks/hooks.json` and `scripts/`: two root hooks. The Stop hook re-prompts a root that ends its turn
   before its closeout counts, up to three times in a row, unless its last line is a `PAUSED:` line
   or a `WAITING: ... until <UTC time>` line. Under a `protocol: v4` charter a closeout counts only
-  when the run's `loop-land` ledger is settled: every landing verified or abandoned, and a
+  when the run's `loop-land` ledger is settled: every merged landing verified with main and any
+  deploy read, no unmerged landing left at `ready` (verify it or abandon it), and a
   `loop-land summary --check` newer than the last merge. A charter with `loop-land: off` is judged
   on the closeout file alone. The PreToolUse hook denies a root's lane dispatch whose brief does not
   open with the contract's header line. Both arm only in a session whose operator message is a loop
@@ -217,8 +218,9 @@ grants go in the charter's `authority:` lines.
 ## Development
 
 `just check` runs the syntax checks and the tests in `tests/`, which drive the hooks, the launch
-template, `loop-lint`, `loop-land` and `wait-until` against temporary repositories, and `dsreview`
-against a local fake gateway. `claude plugin validate .` checks the manifests.
+template and `loop-lint` against temporary repositories, run `wait-until` to a pass and to a
+timeout, check that `loop-land` starts, and drive `dsreview` against a local fake gateway. The
+landing logic of `loop-land` has no test in this tree. `claude plugin validate .` checks the manifests.
 
 ## Where this comes from
 
