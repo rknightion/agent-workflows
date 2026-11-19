@@ -1,4 +1,4 @@
-"""Checks on the published plugin: manifests, the loop skill's launch template, hooks and loop-lint.
+"""Checks on the published plugin: manifests, the loop skill's launch template, hooks and the bin/ programs.
 
 Every test works in a temporary directory; nothing touches a Claude Code home or ~/.local/state.
 """
@@ -24,7 +24,8 @@ import fanout_continue  # noqa: E402
 import fanout_session  # noqa: E402
 import loop_launch  # noqa: E402
 
-LOOP_LINT = os.path.join(PLUGIN, "bin", "loop-lint")
+BIN = os.path.join(PLUGIN, "bin")
+LOOP_LINT = os.path.join(BIN, "loop-lint")
 PLUGIN_ROOT_VAR = "${CLAUDE_PLUGIN_ROOT}"
 
 
@@ -69,8 +70,36 @@ class Manifests(unittest.TestCase):
             script = re.search(r'"\$\{CLAUDE_PLUGIN_ROOT\}/([^"]+)"', command).group(1)
             self.assertTrue(os.path.isfile(os.path.join(PLUGIN, script)), script)
 
-    def test_loop_lint_is_executable(self):
-        self.assertTrue(os.access(LOOP_LINT, os.X_OK))
+    def test_the_bin_programs_are_executable(self):
+        for name in ("loop-lint", "loop-land", "loop-teardown", "wait-until"):
+            with self.subTest(program=name):
+                self.assertTrue(os.access(os.path.join(BIN, name), os.X_OK))
+
+
+class Programs(unittest.TestCase):
+    """The protocol tells the root to land with loop-land and every agent to wait with wait-until."""
+
+    def run_program(self, name, *args):
+        with tempfile.TemporaryDirectory() as elsewhere:
+            return subprocess.run([sys.executable, os.path.join(BIN, name), *args], cwd=elsewhere,
+                                  capture_output=True, text=True, timeout=60)
+
+    def test_loop_land_runs(self):
+        result = self.run_program("loop-land", "--help")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ready", result.stdout)
+
+    def test_wait_until_returns_when_the_test_passes(self):
+        result = self.run_program("wait-until", "--timeout", "5s", "--what", "x", "--", "true")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_wait_until_times_out_with_124(self):
+        result = self.run_program("wait-until", "--timeout", "1s", "--every", "0.2", "--what", "x", "--", "false")
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertIn("TIMED OUT", result.stderr)
+
+    def test_wait_until_has_a_portable_interpreter_line(self):
+        self.assertEqual(read(BIN, "wait-until").splitlines()[0], "#!/usr/bin/env python3")
 
 
 class LaunchTemplate(unittest.TestCase):
@@ -198,15 +227,16 @@ class LoopLint(unittest.TestCase):
                 fh.write("Deploy anything.\n")
             self.assertEqual(self.lint("charter", charter).returncode, 1)
 
-    def test_the_readme_loop_md_example_lints_clean(self):
-        example = re.search(r"```markdown\n( *# Loop: .*?)\n *```", read(ROOT, "README.md"), re.S).group(1)
-        text = textwrap.dedent(example) + "\n"
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "LOOP.md")
-            with open(path, "w") as fh:
-                fh.write(text)
-            result = self.lint("loopmd", path, "--offline")
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+    def test_the_readme_loop_md_examples_lint_clean(self):
+        examples = re.findall(r"```markdown\n( *# Loop: .*?)\n *```", read(ROOT, "README.md"), re.S)
+        self.assertEqual(len(examples), 2)
+        for example in examples:
+            with self.subTest(example=example.splitlines()[-1]), tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "LOOP.md")
+                with open(path, "w") as fh:
+                    fh.write(textwrap.dedent(example) + "\n")
+                result = self.lint("loopmd", path, "--offline")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

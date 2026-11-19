@@ -5,7 +5,7 @@ Read by the `loop` skill only. Preparing a run should take minutes, not an hour.
 1. **Last run.** Read the last closeout's `## Parked` and `## For ratification`; apply the owner's
    answers as charter decisions. Run `<plugin root>/bin/loop-teardown reap --repo <abs repo>`
    (a dry run) and put anything it would remove in the owner prompt.
-   **Parked work.** Run `$PROTOCOL_SOURCE/bin/loop-lint parked --repo <abs repo>`: it lists each
+   **Parked work.** Run `<plugin root>/bin/loop-lint parked --repo <abs repo>`: it lists each
    task the last three closeouts parked, with the reason and how many closeouts in a row parked it.
    Write every listed task into the charter's `exclude:`, unless its park named a blocking issue
    that is now closed. Print the list for the owner; a task the owner re-admits stays out of

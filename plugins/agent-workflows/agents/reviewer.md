@@ -31,8 +31,8 @@ work to the summary below.
 Return by message. You write no files, so the steps in LANE.md that write `brief.md`, `return.md`,
 evidence or a patch do not apply to you. Your final message is your whole return. It starts with
 exactly this block (compact JSON, at most 1,800 characters; `patch` and `patch_sha256` null, `base`
-the SHA you reviewed), then the PASS or FAIL line and the findings. Question details and findings go in the message after the block, and `evidence` names an existing
-path or says the verdict is in this message.
+the SHA you reviewed), then the PASS or FAIL line and the findings. Question details and findings go in the message after the block. Set `"review":null`:
+you run no review route, and your verdict is this message itself.
 
 ```lane-return
 {"v":3,"lane":"<id>","task":"<ID>","status":"complete|partial|blocked|failed",

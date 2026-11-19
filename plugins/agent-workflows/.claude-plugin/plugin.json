@@ -1,7 +1,7 @@
 {
   "name": "agent-workflows",
-  "version": "3.2.0",
-  "description": "Loop v3 for Claude Code: the loop preparation skill, six pinned lane agents, the Stop and brief-header hooks, loop-lint and the protocol documents.",
+  "version": "3.2.1",
+  "description": "Loop v4 for Claude Code: the loop preparation skill, six pinned lane agents, the Stop, brief-header and lane-return hooks, loop-lint, loop-land, loop-teardown, wait-until and the protocol documents.",
   "author": {
     "name": "Rob Knight",
     "url": "https://rob-knight.com"
@@ -9,5 +9,5 @@
   "homepage": "https://rob-knight.com/loop/",
   "repository": "https://github.com/rknightion/agent-workflows",
   "license": "Apache-2.0",
-  "keywords": ["loop", "subagents", "backlog", "hooks"]
+  "keywords": ["loop", "subagents", "github-issues", "backlog", "hooks"]
 }
