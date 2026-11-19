@@ -113,6 +113,9 @@ def return_error(payload, role):
         return "status complete conflicts with nonzero check exit " + str(value["exit"])
     if not isinstance(value["questions"], list) or not all(isinstance(q, str) for q in value["questions"]):
         return "questions must be an array of strings"
+    # Optional (still version 3): the design does not fix its shape, so a string or an object.
+    if "tracker" in value and not isinstance(value["tracker"], (str, dict)):
+        return "tracker must be a string or an object"
     review_keys = {"review", "dsreview"} & value.keys()
     if len(review_keys) != 1:
         return "supply exactly one of review or legacy dsreview"

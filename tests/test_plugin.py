@@ -175,6 +175,8 @@ class LoopLint(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             codex = os.path.join(tmp, "codex")
             os.makedirs(codex)
+            with open(os.path.join(tmp, "LOOP.md"), "w") as fh:
+                fh.write("# Loop: repo\n\nci-required: none\n")  # main's CI is not read: no remote here
             standing = os.path.join(codex, "standing.md")
             with open(standing, "w") as fh:
                 fh.write("No standing grants.\n")
@@ -182,10 +184,10 @@ class LoopLint(unittest.TestCase):
             charter = os.path.join(codex, "charter-2026-01-05-loop1.md")
             with open(charter, "w") as fh:
                 fh.write(
-                    "# Charter: repo loop1\n\nharness:    claude\nroot:       claude-opus-5-5 / medium\n"
+                    "# Charter: repo loop1\n\nprotocol:   v4\nharness:    claude\nroot:       claude-opus-5-5 / medium\n"
                     "aim:        Clear the parser backlog.\npriorities: label:parser > status:\"To Do\"\n"
                     "exclude:    label:needs-owner\nlanes:      4\ngate:       just check\n"
-                    "gate-route: local\nstanding:   " + standing + " sha256=" + digest + "\n"
+                    "gate-route: local\nstanding:   " + standing + " sha256=" + digest + "\npreflight:  none\n"
                     "overnight:  keep building waves from the board in priority order\n\n"
                     "## First wave\n\n| Task | Scope | Route | Note |\n|---|---|---|---|\n"
                     "| ABC-1 (fix the parser) | src/parser.py | worker | none |\n"

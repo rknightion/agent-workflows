@@ -47,11 +47,6 @@ Everything lives in `plugins/agent-workflows/`.
   definitions.
 - `bin/loop-lint`: the charter, queue and `LOOP.md` linter. While the plugin is enabled it is on
   the Bash tool's PATH, so the skill, the root and the lanes run it as `loop-lint`.
-- `skills/kodus-review/`: the combined authenticated Kodus and independent local-agent review
-  workflow. It binds both verdicts to one retained candidate and pinned central-rule context.
-- `tools/kodus-review/`: the Python adapter retaining candidate/base snapshots and evidence.
-  Exit 0 is only a Kodus component pass; the separate local verdict remains mandatory. See
-  `tools/kodus-review/README.md` for explicit scope configuration and supported candidates.
 - `tools/dsreview/`: `dsreview`, a code reviewer for lanes. It sends a candidate change and its
   brief to DeepSeek Flash through Cloudflare AI Gateway, lets the model read the repository through
   read-only tools, and prints a PASS or FAIL verdict as JSON. On 59 replayed reviews it caught as
@@ -92,7 +87,7 @@ claude plugin install agent-workflows@rob-knight
 ```
 
 Start a new session (or run `/reload-plugins`). `claude plugin details agent-workflows` should list
-two skills, six agents and the hooks.
+one skill, six agents and the hooks.
 
 ## Prepare a repository
 

@@ -15,6 +15,14 @@ stripping markdown decoration from that line.
 
 A closeout counts when it is a regular file written after the launch, line 1 matches `HEADER_RE`
 with the launch's loop number, and it holds each of `REQUIRED_SECTIONS` on a line of its own.
+
+Loop v4 adds a landing-ledger rule on top of that. The hook knows only the closeout's path; by the
+contract's file naming it finds the run directory (`codex/loop<N>/`, holding `landings.jsonl`) and
+the charter (`codex/charter-*-loop<N>.md`). When the charter says `protocol: v4` and not
+`loop-land: off`, a closeout that passes the v3 rule still does not count while the ledger cannot
+be parsed, a landing's last event is `ready` or `merged`, a `verified` event has main or the deploy
+`unread`, or the last `closeout-check` event is missing, older than the last `merged` event, or not
+`ok`. A charter without `protocol:`, or with `loop-land: off`, is judged by the v3 rule alone.
 """
 
 import datetime
@@ -39,6 +47,17 @@ REQUIRED_SECTIONS = (
     "## For ratification",
     "## Notes",
 )
+
+CLOSEOUT_NAME_RE = re.compile(r"^closeout-.*-loop(\d+)\.md$")
+CHARTER_KEY_RE = re.compile(r"^([A-Za-z][\w-]*):[ \t]*(.*?)\s*$")
+LEDGER_NAME = "landings.jsonl"
+# Ledger events that carry a landing's state (a landing is keyed by its pull request, or by its
+# head in direct mode). `closeout-check` is run-wide; `error` means the tool could not tell, so it
+# changes no landing's state.
+LANDING_EVENTS = ("ready", "refused", "merged", "verified", "abandoned")
+LEDGER_EVENTS = LANDING_EVENTS + ("closeout-check", "error")
+MAIN_STATES = ("green", "red", "unread")
+DEPLOY_STATES = ("synced", "failed", "unread", "n/a")
 
 PAUSED_RE = re.compile(r"^PAUSED: .+$")
 WAITING_RE = re.compile(r"^WAITING: .+ until (\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?Z)$")
@@ -331,7 +350,177 @@ def report_status(launch, cwd):
     missing = [section for section in REQUIRED_SECTIONS if section not in lines]
     if missing:
         return False, "is missing sections: " + ", ".join(missing)
+    ledger_why = _ledger_rule(path)
+    if ledger_why:
+        return False, ledger_why
     return True, None
+
+
+def _charter_for(codex_dir, loop):
+    """The path of the run's charter (`charter-*-loop<N>.md` beside the closeout), or None. When
+    several carry the loop number the last by name (the latest date) is the run's."""
+    name_re = re.compile(r"^charter-.*-loop" + str(loop) + r"\.md$")
+    try:
+        names = sorted(n for n in os.listdir(codex_dir) if name_re.match(n))
+    except OSError:
+        return None
+    for name in reversed(names):
+        path = os.path.join(codex_dir, name)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
+def _charter_requires_ledger(path):
+    """True when the charter says `protocol: v4` and does not say `loop-land: off`. Only a `key:
+    value` line in the charter's header counts (before the first `## ` heading, outside code
+    fences, which close only on a fence of the same character at least as long); the first of each
+    key wins, and its first token is compared, quotes stripped."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return False
+    keys = {}
+    fence = None
+    for line in lines:
+        marker = FENCE_RE.match(line)
+        if fence:
+            if marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence) \
+                    and not line.strip().strip(fence[0]):
+                fence = None
+            continue
+        if marker:
+            fence = marker.group(1)
+            continue
+        if line.startswith("## "):
+            break
+        match = CHARTER_KEY_RE.match(line)
+        if match and match.group(1).lower() not in keys:
+            value = match.group(2).split()
+            keys[match.group(1).lower()] = value[0].strip("\"'`").lower() if value else ""
+    return keys.get("protocol") == "v4" and keys.get("loop-land") != "off"
+
+
+def _ledger_rule(closeout_path):
+    """The v4 landing-ledger rule for a closeout that passed the v3 rule: None when it holds or
+    does not apply, else a short clause naming the first failed rule."""
+    named = CLOSEOUT_NAME_RE.match(os.path.basename(closeout_path))
+    if not named:
+        return None
+    codex_dir = os.path.dirname(closeout_path)
+    loop = int(named.group(1))
+    charter = _charter_for(codex_dir, loop)
+    if charter is None or not _charter_requires_ledger(charter):
+        return None
+    ledger = os.path.join(codex_dir, f"loop{loop}", LEDGER_NAME)
+    why = _ledger_why_not(ledger)
+    if why:
+        return f"does not count under protocol v4: {why}"
+    return None
+
+
+def _ledger_event(line):
+    """One parsed ledger line as ``(event, epoch)``, or a string naming what is wrong with it."""
+    try:
+        event = json.loads(line)
+    except (ValueError, RecursionError):
+        return "is not valid JSON"
+    if not isinstance(event, dict):
+        return "is not a JSON object"
+    if event.get("event") not in LEDGER_EVENTS:
+        return f"has an unknown event {event.get('event')!r}"
+    epoch = _epoch(event.get("ts")) if isinstance(event.get("ts"), str) else None
+    if epoch is None:
+        return "has no readable `ts`"
+    if event["event"] in LANDING_EVENTS and _landing_key(event) is None:
+        return "names neither a pull request nor a head"
+    if event["event"] == "verified" and (
+        event.get("main") not in MAIN_STATES or event.get("deploy") not in DEPLOY_STATES
+    ):
+        return "is a `verified` event without a valid `main` and `deploy`"
+    return event, epoch
+
+
+def _landing_key(event):
+    pr, head = event.get("pr"), event.get("head")
+    if type(pr) is int:
+        return f"pull request #{pr}"
+    if isinstance(head, str) and head.strip():
+        return f"head {head[:12]}"
+    return None
+
+
+def _unsettled(history):
+    """``(what, hint)`` when a landing's events leave it unsettled, else None. A landing that was
+    merged needs a `verified` event after its merge with main and the deploy read, whatever event
+    follows (`abandoned` and `refused` do not undo a merge); one never merged is open only at
+    `ready`."""
+    last_merged = max((i for i, e in enumerate(history) if e["event"] == "merged"), default=None)
+    if last_merged is not None:
+        verified = [e for e in history[last_merged:] if e["event"] == "verified"]
+        if not verified:
+            return "was merged and not verified", "run `loop-land verify`"
+        latest = verified[-1]
+        if "unread" in (latest["main"], latest["deploy"]):
+            what = "main" if latest["main"] == "unread" else "the deploy"
+            return f"was verified with {what} unread", "run `loop-land verify` again"
+        return None
+    if history[-1]["event"] == "ready":
+        return "is at `ready`", "run `loop-land verify` if it merged, else `loop-land abandon`"
+    return None
+
+
+def _ledger_why_not(path):
+    """None when the run's landing ledger lets the closeout count, else a clause saying why not."""
+    if not os.path.exists(path):
+        return (f"the landing ledger {path} does not exist, so there is no `closeout-check` "
+                "event (run `loop-land summary --check`)")
+    if not os.path.isfile(path):
+        return f"the landing ledger {path} is not a regular file"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return f"the landing ledger {path} cannot be read or parsed"
+    events = []
+    for number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        parsed = _ledger_event(line)
+        if isinstance(parsed, str):
+            return f"the landing ledger {path} cannot be parsed: line {number} {parsed}"
+        events.append(parsed)
+    states = {}
+    for event, _ in events:
+        if event["event"] in LANDING_EVENTS:
+            states.setdefault(_landing_key(event), []).append(event)
+    open_landings, hints = [], set()
+    for key, history in states.items():
+        problem = _unsettled(history)
+        if problem:
+            open_landings.append(f"{key} {problem[0]}")
+            hints.add(problem[1])
+    if open_landings:
+        return ("the landing ledger is not settled: " + "; ".join(open_landings[:5])
+                + " (" + " or ".join(sorted(hints)) + ")")
+    checks = [i for i, (e, _) in enumerate(events) if e["event"] == "closeout-check"]
+    if not checks:
+        return "the landing ledger has no `closeout-check` event (run `loop-land summary --check`)"
+    merges = [(i, t) for i, (e, t) in enumerate(events) if e["event"] == "merged"]
+    last = checks[-1]
+    check, check_epoch = events[last]
+    if merges and (last < merges[-1][0] or check_epoch < max(t for _, t in merges)):
+        return ("the last `closeout-check` event is older than the last `merged` event "
+                "(run `loop-land summary --check` again)")
+    if check.get("outcome") != "ok":
+        missing = check.get("missing")
+        return ("the last `closeout-check` event is not `ok`"
+                + (f" (the ledger lacks: {missing})" if missing else ""))
+    return None
 
 
 def report_counts(launch, cwd):

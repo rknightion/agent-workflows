@@ -18,5 +18,5 @@ these; missing evidence parks activation. Never infer identity or import another
   a round; only APPROVED permits merge.
   If no head check exists after about 3 minutes, run `gh pr edit <n> --add-reviewer @copilot` once
   per head. Resolve only Copilot threads verified fixed; log proof in `DECISIONS.md`. Unresolved
-  findings block merge; disputes go to the owner. Re-read all thread pages before merge. Without
+  findings block merge; disputes follow contract section 5 (a fresh reviewer). Re-read all thread pages before merge. Without
   head APPROVED, wait within step 5's caps; never bypass or self- or bot-approve.
