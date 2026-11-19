@@ -1,0 +1,52 @@
+# Identifier patterns: what must never appear in a tracker write to a public issue.
+#
+# The tracker reads this file on every write and refuses a payload that matches any line. Set
+# TRACKER_IDENTIFIER_PATTERNS to the path of another file to use that one instead (copy this one and
+# add lines: the override replaces it, it does not add to it). Address handling is separate and stays
+# in textsafe.py.
+#
+# Format: one regular expression per line, matched case-insensitively. A line starting with # and an
+# empty line are comments. Only syntax that Rust regex (rg) and Python re read the same way is
+# accepted, and the tracker refuses the file otherwise: literal letters, digits and @ _ : = % ~ ! & , / -,
+# an escaped dot (\.), a bracket set of plain characters or ranges, and one + * ? or {n,m} after an
+# atom. No wildcard dot, alternation, anchors, groups or class shorthands; add a line instead of an
+# alternation. A bracketed letter (the [x] form) matches what the plain letter would but keeps the
+# sweep from matching this file's own text, so a write may quote any line of this file as written (a
+# test holds that). Write the shape, not the instance.
+#
+# Fail closed: a missing, unreadable or pattern-free file, or a line that does not compile, makes the
+# tracker refuse every write.
+
+# Secrets and tokens.
+gh[pousr]_[A-Za-z0-9]{36}
+github_pa[t]_[A-Za-z0-9_]{22,}
+gl[p]at-[A-Za-z0-9_-]{20}
+AKI[A][0-9A-Z]{16}
+ASI[A][0-9A-Z]{16}
+AIz[a][0-9A-Za-z_-]{35}
+xox[abposr]-[A-Za-z0-9-]{10,}
+hooks\.slack\.com/service[s]/
+sk_liv[e]_[0-9A-Za-z]{16,}
+rk_liv[e]_[0-9A-Za-z]{16,}
+sk-an[t]-[A-Za-z0-9_-]{20,}
+sk-pro[j]-[A-Za-z0-9_-]{20,}
+np[m]_[A-Za-z0-9]{36}
+py[p]i-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{30,}
+tske[y]-[A-Za-z0-9-]{10,}
+glc_ey[J][A-Za-z0-9_-]{10,}
+ey[J][A-Za-z0-9_-]{10,}\.ey[J][A-Za-z0-9_-]{10,}
+-----BEGI[N]
+://[A-Za-z0-9._-]+:[A-Za-z0-9._-]+@
+
+# Personal data: consumer mailboxes and private network names.
+@gma[i]l
+@googlemai[l]\.
+@outloo[k]\.
+@hotmai[l]\.
+@liv[e]\.com
+@yaho[o]\.
+@iclou[d]\.com
+@m[e]\.com
+@proto[n]\.me
+@protonmai[l]\.
+\.ts\.ne[t]

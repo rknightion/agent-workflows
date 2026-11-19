@@ -62,7 +62,8 @@ Everything lives in `plugins/agent-workflows/`.
   - `loop-land`: the landing tool. `ready` decides whether a pull request (or, in direct mode, a
     commit) may land now and prints the merge command for the root to run; `verify` records what
     the merge did to main and any deploy; `abandon` and `summary` close the record. It never merges
-    or pushes itself, and it keeps its ledger in the run directory (`landings.jsonl`).
+    or pushes itself, and it keeps its ledger in the run directory (`landings.jsonl`). Two states stop
+    a run on purpose: see "When `loop-land` stops on purpose" below.
   - `loop-teardown`: removes the worktrees, caches and large logs a run left behind (`closeout` for
     one run, `reap` for every finished run of a repository), archiving anything not already on a
     remote first. It is a dry run unless given `--apply`.
@@ -73,6 +74,12 @@ Everything lives in `plugins/agent-workflows/`.
   read-only tools, and prints a PASS or FAIL verdict as JSON. On 59 replayed reviews it caught as
   many defects as Opus reviewer lanes (8 of 11 each) with no false blocks, at about $0.05 a review
   against about $1.09. It is optional and needs your own gateway: see `tools/dsreview/README.md`.
+- `tools/tracker/`: `tracker`, the one way the loop root writes GitHub issues and a GitHub Project:
+  `queue` lists the ready issues, and `create`, `claim`, `status`, `handoff`, `tick` and `close` write
+  them. Lanes never run it. `close --pr` closes an issue only on a merged pull request's passing
+  acceptance evidence. It runs as your `gh` login or, optionally, as a GitHub App through
+  `with-token`. The protocol's `just tracker <command>` is a recipe of your own that runs it: see
+  `protocol/README.md` and `tools/tracker/README.md`.
 - `protocol/`: the contract, the three harness files, the charter and lane templates, the planner,
   the review profiles and the board setup guide. See `protocol/README.md`.
 
@@ -94,6 +101,8 @@ Everything lives in `plugins/agent-workflows/`.
     and `loop-lint queue` read tasks through.
 - Recommended: `just`, because the protocol's gate and verification examples are `just` recipes
   (any gate command works).
+- For the tracker tool, only if you use it: Python 3.12 or later, `gh` signed in with the `project`
+  scope, and a GitHub Project with the fields `protocol/README.md` lists.
 - Optional: `dsreview` (in this plugin, Python 3.12 or later and a Cloudflare AI Gateway with a
   DeepSeek key), one command that can fill the lane template's local review step. With no local
   reviewer, the planner freezes `none` there and lanes return `"review":null`.
@@ -162,7 +171,8 @@ one skill, six agents and the hooks.
 
    ## Queue
 
-   Ready issues, in priority order: `just queue` (a recipe of your own). Only the root writes issues.
+   Ready issues, in priority order: `just tracker queue` (a recipe of your own that runs
+   `tools/tracker/tracker.py`, see `protocol/README.md`). Only the root writes issues.
    ```
 
    Inside Claude Code, check it with `loop-lint loopmd LOOP.md --offline`.
@@ -191,6 +201,30 @@ every gate leg and required check on the head is green, waits on main's CI for t
 `wait-until`, and keeps no ledger, and the Stop hook judges the closeout on the file alone. The skill
 writes the line only when you ask for it.
 
+### When `loop-land` stops on purpose
+
+Two states stop a run and need the repository owner, never the loop root:
+
+- A pull request merged while `ready` was waiting. `ready` stopped with exit 30 and took no slot, so
+  no landing is recorded.
+- `verify` returned `wrong-head` (exit 21): the pull request merged with a head other than the slot's.
+  The landing slot stays held, so every later `ready` is `slot-busy`.
+
+The owner first confirms on GitHub what merged (`gh pr view <n> --json headRefOid,mergeCommit`). If it
+is the change the run meant to land, the owner runs
+
+```sh
+loop-land adopt --repo <path> --run-dir <dir> --pr <n> --merged-head <sha> --reason "<why>"
+```
+
+with `--issues 11,12` as well when no slot or earlier event for the pull request names them, and then
+`loop-land verify --repo <path> --run-dir <dir> --pr <n>`. `adopt` writes one `merged` event, frees
+the slot when it names this pull request, and never merges, pushes or writes to GitHub. It refuses
+and writes nothing unless GitHub shows the pull request merged at exactly `--merged-head` with a
+merge commit on main. Exit 40 means it is not adoptable and 41 means the ledger already records the
+merge. If the merged change is not what the run meant to land, do not adopt: fix forward by hand and
+say so in the closeout.
+
 ### Standing authority
 
 A charter can point at a Standing file: per-repository grants (live reads, deploy targets) that
@@ -209,9 +243,7 @@ grants go in the charter's `authority:` lines.
 
 - Codex, pi and Claude-on-GPT runtimes. Their harness files are in `protocol/loop/` for
   reference, but this plugin supplies only the Claude Code hooks and agents.
-- Tools from the author's own setup: the `just tracker` command the protocol names for reading and
-  closing tracker items (use your tracker's own commands, see `protocol/README.md`), syncing
-  `codex/` between machines, the session catalogue that reports a run's usage, the remote gate
+- Tools from the author's own setup: syncing `codex/` between machines, the session catalogue that reports a run's usage, the remote gate
   runner, the watchdog and scheduled verification. The protocol mentions some of them; skip those
   steps.
 
@@ -219,8 +251,10 @@ grants go in the charter's `authority:` lines.
 
 `just check` runs the syntax checks and the tests in `tests/`, which drive the hooks, the launch
 template and `loop-lint` against temporary repositories, run `wait-until` to a pass and to a
-timeout, check that `loop-land` starts, and drive `dsreview` against a local fake gateway. The
-landing logic of `loop-land` has no test in this tree. `claude plugin validate .` checks the manifests.
+timeout, and drive `dsreview` against a local fake gateway. It also runs the `loop-land` tests, which
+drive every command of the landing tool against temporary repositories with a stand-in `gh`, and the
+tracker tests, which drive the tracker against a stand-in `gh` (they skip below Python 3.12).
+`claude plugin validate .` checks the manifests.
 
 ## Where this comes from
 

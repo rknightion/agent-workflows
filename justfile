@@ -25,7 +25,8 @@ lint:
     python3 -c 'import ast, sys; [ast.parse(open(p).read(), p) for p in sys.argv[1:]]' plugins/agent-workflows/bin/loop-lint plugins/agent-workflows/bin/loop-land plugins/agent-workflows/bin/loop-teardown plugins/agent-workflows/bin/wait-until
     git diff --check
 
-# Drive the hooks, the launch template, the bin/ programs and dsreview against temporary repositories.
+# Drive the hooks, the launch template, the bin/ programs (loop-land included, with a stand-in gh), dsreview and
+# the tracker (with a stand-in gh) against temporary repositories.
 [group('check')]
 test:
     python3 -m unittest discover -s tests

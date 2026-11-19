@@ -137,8 +137,8 @@ Outcomes: `held` or `main-red`: stop landing; land main's fix with `--fix-forwar
 `slot-busy`: finish the active landing. `main-undecided`: diagnose missing main checks or park.
 `stale-head`: rerun after review sees the new head. `checks-failed`: return to lane.
 `error`: read JSON and rerun. `unread`: rerun `verify` later. `deploy-failed`: repair under grant
-or park. `wrong-head`: stop and tell the owner. Use `loop-land abandon` for unmergeable work.
-Revert only by recorded decision when it blocks all landing, damages data or a deploy, or cannot be repaired.
+or park. `wrong-head`: stop; owner runs `loop-land adopt`. `loop-land abandon`: unmergeable work.
+Revert only by recorded decision if it blocks all landing, damages data or a deploy, or is unrepairable.
 
 **Direct mode.** `ready` and `verify` take `--sha <head>`; push the green tree on `go`.
 
