@@ -1,9 +1,26 @@
 #!/usr/bin/env python3
-"""Lint loop files: loop-lint loopmd <LOOP.md> | charter <charter.md> | queue <charter.md> <QUEUE.md>.
+"""Lint loop files: loop-lint loopmd <LOOP.md> | charter <charter.md> | queue <charter.md> <QUEUE.md> | parked --repo P.
 
-`charter` checks the v3 charter shape (sources/loop/charter.md): the `# Charter: <repo> loop<N>` header,
+`charter` checks the charter shape (sources/loop/charter.md): the `# Charter: <repo> loop<N>` header,
 the required keys (harness, root, aim, priorities, exclude, lanes, gate, gate-route, standing, overnight),
 a `## First wave` table, at most 8 KB, and a `standing:` file that exists with the recorded sha256.
+Of the subcommands only `charter` refuses a charter without `protocol: v4` (C6); `queue` reads only the
+charter's header and `exclude:`. `preflight:` is `none` or a list, one indented line per privileged
+command, in the charter template's shape `- <exact command> | proves: <what a pass shows> | rows: <task IDs
+or #N, comma separated, or all>` (C7, reported at the item's line). The charter fails (C8) when `deploy-on-push: yes` resolves no `deploy-verify:` (an explicit `none`
+resolves it) and (C9) when main's state cannot be read: `ci-required:` is not none, there is no
+`ci-status:`, and some required check never reports on main's head (origin not on GitHub, or an unreadable
+answer, counts too; `--offline` skips only the read of main). The keys resolve as `loop-land` resolves
+them: LOOP.md in the repository (`--repo`, default the parent of `codex/`), then the Standing file's
+`## Commands` over it, read by the one reader in `loop_checks.py`. That section is checked too (S1): only
+the six command keys, valid values, a recipe value that is the bare command or wholly wrapped in backticks
+with nothing after it (`loop-land` runs it with a shell), and for each recipe (`ci-status`,
+`deploy-verify` other than `none`) a statement of what exits 0, 1 and 2 mean, as an indented line under its
+bullet or prose after the list, in any wording that names all three codes (`Same exit codes` is enough for
+a later recipe).
+`parked --repo P` lists the tasks the last three `codex/closeout-<date>-loop<N>.md` files of P parked
+(bullets under `## Parked` that open with a task ID or `#N`), each with its latest reason and the number of
+closeouts in a row that parked it, counted back from the newest closeout that did.
 `queue` reads task IDs from the ready rows of a QUEUE.md and fails any ID in the charter's `exclude:`
 list, any Done task and any task carrying an excluded label. Ready rows are the table rows and list items
 under a `## Ready` heading, or, with no such heading, every row outside the Hold, Landing and Done
@@ -13,9 +30,18 @@ is read with `backlog task view <id> --plain` in the repository that owns the ch
 its first `#N` instead, read with `gh issue view N -R <origin owner/repo>`; a closed issue fails as Done
 does, and a ready row naming only a board task ID fails.
 `loopmd` checks a repository's LOOP.md; `tracker: github` there needs `landing: pr` and a `## Queue` section.
+`tracker-repo:` names a GitHub tracker on its own and implies pull request mode. A LOOP.md with no
+`tracker:` key is read as Backlog only when the repository has a `backlog/` directory, GitHub otherwise,
+and a declared GitHub tracker (`tracker: github`) is held to `landing: pr` and a `## Queue` section; the
+implied one lands by pull request by default: `landing: direct` is refused, nothing else is required.
+A repository whose origin is positively a GitHub repository under an account that the owner-accounts file
+(`authority/owner-accounts.txt` beside this tool's repository, one account per line, `#` comments, compared
+case-insensitively; `LOOP_LINT_OWNER_ACCOUNTS` names another path) does not list is not held to the personal
+key set (the required `tier`, `gate`, `ci-required`, `grafana-stack`) or the size cap. An origin that cannot
+be placed stays strict, and with no such file every repository is held to both.
 
 A repository whose issues live in another repository names it `tracker-repo: OWNER/REPO` in LOOP.md (valid
-only with `tracker: github`), in the charter, or as `queue --tracker-repo OWNER/REPO`; the queue check then
+only with `tracker: github` or no `tracker:` key), in the charter, or as `queue --tracker-repo OWNER/REPO`; the queue check then
 reads that repository's issues instead of origin's. The option beats the charter key, which beats LOOP.md.
 The charter and the option exist so a public repository never commits a private repository's name; with
 either, a LOOP.md that has no `tracker:` key is read as `github`, while an explicit `tracker: backlog` fails.
@@ -36,14 +62,16 @@ none. Any other origin is `not verifiable (not on GitHub)`, which L2 says as inf
 neutral CI run is not a pass.
 """
 import argparse
-import csv
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
-import subprocess
 import sys
-from urllib.parse import quote
+
+from loop_checks import (COMMAND_KEYS, STANDING_VALUE, GhError, NotOnGitHub, ci_required_names, commands_body,
+                         commands_entries, main_required_state, opening_entries, opening_keys, origin_slug,
+                         read_check_inputs, required_checks, run, split_globs, standing_commands)
 
 CHARTER_MAX = 8192
 FIRST_WAVE_ROWS = 20
@@ -53,7 +81,6 @@ HARNESSES = ('claude', 'codex', 'pi')
 CHARTER_HEADER = re.compile(r'^# Charter: (\S+) loop(\d+)$')
 CHARTER_FILE = re.compile(r'^charter-.*-loop(\d+)\.md$')
 PLACEHOLDER = re.compile(r'(?<!\S)<[A-Za-z][^<>]*>(?!\S)')
-STANDING_VALUE = re.compile(r'^(/\S+)\s+sha256=([0-9a-f]{64})$')
 BUDGET_VALUE = re.compile(r'^(?:none|\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?Z)$')
 TASK_ID = re.compile(r'(?<![\w-])[A-Z][A-Z0-9]*-\d+(?:\.\d+)*(?![\w-])')
 ISSUE_REF = re.compile(r'(?<![\w/#])#(\d+)(?![\w-])')
@@ -70,18 +97,24 @@ PROTOCOL_POINTERS = (
     (re.compile(r'Appendix [ABC]\b'), 'appendix pointer'),
     (re.compile(r'contract\.md#'), 'contract anchor'),
 )
-GITHUB_REMOTE = re.compile(r'^(?:(?:https?|ssh|git)://(?:[^@/]+@)?|[^@/:]+@)?github\.com[:/]'
-                           r'([^/\s]+/[^/\s]+?)(?:\.git)?/?$', re.IGNORECASE)
 BASELINE_RED = re.compile(r'^[A-Z][A-Z0-9]*-\d+(?:\.\d+)* - \S')
-FAILURE_CONCLUSIONS = ('failure', 'timed_out', 'startup_failure')
 
-
-class GhError(Exception):
-    pass
-
-
-class NotOnGitHub(GhError):
-    pass
+# The accounts whose repositories are held to the personal key set are listed one per line in this file;
+# the lint names none itself, so a copy without the file exempts no repository.
+OWNER_ACCOUNTS_FILE = Path(__file__).resolve().parent.parent / 'authority' / 'owner-accounts.txt'
+OWNER_ACCOUNTS_ENV = 'LOOP_LINT_OWNER_ACCOUNTS'
+PROTOCOL = 'v4'
+# `loop-land` runs these two with a shell, so their value is the command and nothing else.
+RECIPE_KEYS = ('ci-status', 'deploy-verify')
+MEANINGS_IN_VALUE = re.compile(r'[;,]\s*exits?\b|\bexit codes?\b|cannot tell|\b[012]\s+(?:pass|fail)\b', re.IGNORECASE)
+SAME_EXIT_CODES = re.compile(r'^\s*same exit codes\.?\s*$', re.IGNORECASE)
+# The charter template's item: `- <exact command> | proves: <what a pass shows> | rows: <task IDs, or all>`.
+PREFLIGHT_ITEM = re.compile(r'^[-*+]\s+(.*?)\s+\|\s+proves:\s*(.*?)\s+\|\s+rows:\s*(.*)$')
+CLOSEOUT_FILE = re.compile(r'^closeout-(\d{4}-\d\d-\d\d)-loop(\d+)\.md$')
+PARKED_ID = r'[`*_]*(?:[A-Z][A-Z0-9]*-\d+(?:\.\d+)*|#\d+)(?![\w-])[`*_]*'
+PARKED_BULLET = re.compile(rf'^(?:[-*+]|\d+[.)])\s+({PARKED_ID}(?:\s*(?:,|&|/|\band\b)\s*{PARKED_ID})*)(.*)$')
+PARKED_ANY_ID = re.compile(r'(?<![\w/#-])(?:[A-Z][A-Z0-9]*-\d+(?:\.\d+)*|#\d+)(?![\w-])')
+PARKED_WINDOW = 3
 
 
 class Report:
@@ -151,156 +184,125 @@ def check_pointers(report, rule, text):
                 report.error(rule, number, f'{label} ({pattern.pattern}): restate nothing, point at nothing')
 
 
-def parse_loopmd_keys(text):
-    """(keys, lines): the opening key: value lines of a LOOP.md, before its first `## ` heading."""
-    keys, where = {}, {}
-    for number, line, fenced in numbered(text):
-        if fenced:
+def check_command_values(report, rule, entries):
+    """The value of each command key in `entries` ({key: (value, line, raw value)}) that `loop-land` reads
+    from LOOP.md or a Standing file's `## Commands`. A recipe (`ci-status`, `deploy-verify`) is the bare
+    command or the command wholly wrapped in backticks: `loop-land` runs the value with a shell, so text
+    after it (exit meanings after a `;`, text after the closing backtick) would run as part of it."""
+    for key, (value, line, raw) in entries.items():
+        if key == 'ci-status':
+            if '{sha}' not in value:
+                report.error(rule, line, '`ci-status:` must contain {sha} for the exact commit')
+        elif key == 'ci-max-minutes':
+            if not re.match(r'^[1-9][0-9]*$', value):
+                report.error(rule, line, 'invalid `ci-max-minutes:`, want a positive integer')
+        elif key == 'deploy-on-push':
+            if value not in ('yes', 'no'):
+                report.error(rule, line, f'invalid `deploy-on-push:` value {value!r} (yes | no)')
+        elif key == 'deploy-paths':
+            if not split_globs(value):
+                report.error(rule, line, '`deploy-paths:` is empty; drop the key or name globs')
+        elif key == 'deploy-verify':
+            if not value:
+                report.error(rule, line, '`deploy-verify:` is empty; name the deploy read or `none`')
+        if key in RECIPE_KEYS and value:
+            wrapped = raw.startswith('`') and raw.endswith('`') and len(raw) >= 2 and '`' not in raw[1:-1]
+            if ('`' in raw and not wrapped) or (not wrapped and MEANINGS_IN_VALUE.search(value)):
+                report.error(rule, line, f'`{key}:` must be the bare command or wholly wrapped in backticks, '
+                                         'with nothing after it: loop-land runs the value with a shell. Put the '
+                                         'exit meanings on an indented line under the bullet')
+
+
+def names_all_exit_codes(text):
+    """True when `text` names the exit codes 0, 1 and 2, in any wording."""
+    return all(re.search(rf'(?<![\w.]){code}(?!\w|\.\d)', text) for code in '012')
+
+
+def prose_lines(text):
+    """The unindented, non-key lines of a Standing file's `## Commands` section outside fences: the prose
+    after the list, where a section may say what its recipes' exit codes mean."""
+    keys = commands_entries(text)
+    key_numbers = {number for _, number, _ in keys.values()}
+    out, fence = [], None
+    for number, line in commands_body(text):
+        stripped = line.lstrip()
+        marker = stripped[:3] if stripped[:3] in ('```', '~~~') else None
+        if fence is None and marker:
+            fence = marker
             continue
-        if line.startswith('## '):
-            break
-        match = re.match(r'^([a-z][a-z0-9-]*):\s*(.*?)\s*$', line)
-        if match and match.group(1) not in keys:
-            keys[match.group(1)] = match.group(2)
-            where[match.group(1)] = number
-    return keys, where
+        if fence is not None:
+            fence = None if marker == fence else fence
+            continue
+        if line.strip() and line[:1] not in (' ', '\t') and number not in key_numbers:
+            out.append(line)
+    return out
 
 
-# --- git / gh -------------------------------------------------------------------------------
+def lint_standing_commands(report, text):
+    """A Standing file's `## Commands` section: only the command keys, valid values, and a statement of
+    what exits 0, 1 and 2 of each recipe mean (`loop-land` reads them as pass, fail, cannot tell): an
+    indented line under the recipe's bullet, or prose after the list, in any wording that names all three
+    codes; `Same exit codes` is enough for a later recipe."""
+    entries = commands_entries(text)
+    lines = dict(commands_body(text))
+    for key, (value, line, _) in entries.items():
+        if key not in COMMAND_KEYS:
+            report.error('S1', line, f'unknown key `{key}:` in `## Commands`; loop-land ignores it '
+                                     f'(keys: {", ".join(COMMAND_KEYS)})')
+    check_command_values(report, 'S1', {k: v for k, v in entries.items() if k in COMMAND_KEYS})
+    if 'ci-required' in entries and not entries['ci-required'][0]:
+        report.error('S1', entries['ci-required'][1], '`ci-required:` is empty; name the checks or `none`')
+    recipes = sorted((entries[k][1], k) for k in RECIPE_KEYS
+                     if k in entries and entries[k][0].lower() not in ('', 'none'))
+    prose_ok = names_all_exit_codes(' '.join(prose_lines(text)))
+    said = False  # an earlier recipe has said what its exit codes mean
+    for line, key in recipes:
+        under, number = [], line + 1
+        while number in lines and (not lines[number].strip() or lines[number][:1] in (' ', '\t')):
+            if lines[number].strip():
+                under.append(lines[number].strip())
+            number += 1
+        own = names_all_exit_codes(' '.join(under))
+        if own or prose_ok or (said and any(SAME_EXIT_CODES.match(u) for u in under)):
+            said = True
+        else:
+            report.error('S1', line, f'`{key}:` needs an indented line under it, or prose after the list, '
+                                     'saying what its exit codes 0, 1 and 2 mean (pass, fail, cannot tell)')
 
-def run(argv, cwd=None):
+
+def owner_accounts():
+    """The lowercase account names in the owner-accounts file: one per line, `#` starts a comment. Empty
+    when the file is absent or unreadable."""
+    path = Path(os.environ.get(OWNER_ACCOUNTS_ENV) or OWNER_ACCOUNTS_FILE)
     try:
-        return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.SubprocessError) as error:
-        raise GhError(f'{argv[0]} failed to run: {error}')
-
-
-def origin_slug(repo):
-    """owner/repo of a github.com origin. NotOnGitHub when origin is anywhere else, since GitHub then
-    holds no branch protection to read and the required checks are unknowable."""
-    result = run(['git', '-C', str(repo), 'config', '--get', 'remote.origin.url'])
-    if result.returncode != 0:
-        raise GhError('no git remote named origin')
-    url = result.stdout.strip()
-    match = GITHUB_REMOTE.match(url)
-    if not match:
-        raise NotOnGitHub(f'origin {url!r} is not a github.com remote')
-    return match.group(1)
-
-
-def gh_api_status(endpoint):
-    """(HTTP status, parsed body, message) for `gh api -i <endpoint>`. Decided on the status code,
-    never on text in the output; no status line at all (gh failed before a response) is an error."""
-    result = run(['gh', 'api', '-i', endpoint])
-    head, _, body = result.stdout.replace('\r\n', '\n').partition('\n\n')
-    status = re.match(r'^HTTP/\S+ (\d{3})', head)
-    if not status:
-        raise GhError(f'gh api {endpoint} gave no HTTP response: '
-                      f'{(result.stderr or result.stdout).strip()[:200]}')
-    try:
-        data = json.loads(body) if body.strip() else None
-    except ValueError:
-        raise GhError(f'gh api {endpoint} returned invalid JSON')
-    message = data.get('message', '') if isinstance(data, dict) else ''
-    return int(status.group(1)), data, message
-
-
-def ci_required_names(value):
-    """The check names a `ci-required` value declares: comma-separated, a name holding a comma in
-    double quotes, or `none`."""
-    if value.strip().lower() == 'none':
+        lines = path.read_text(encoding='utf-8').splitlines()
+    except (OSError, UnicodeDecodeError):
         return set()
-    return {c.strip() for c in next(csv.reader([value], skipinitialspace=True), []) if c.strip()}
+    return {line.split('#')[0].strip().lower() for line in lines if line.split('#')[0].strip()}
 
 
-def required_checks(repo, branch="main"):
-    """Required status checks for the landing branch: active rulesets plus classic
-    branch protection. The rulesets endpoint answers 200 for any repository gh can see, so anything
-    else is an error; the only 404 read as empty is classic protection's `Branch not protected`."""
-    slug = origin_slug(repo)
-    ref = quote(branch, safe="")
-    names = set()
-    status, data, message = gh_api_status(f'repos/{slug}/rules/branches/{ref}?per_page=100')
-    if status != 200 or not isinstance(data, list):
-        raise GhError(f'rulesets for {slug} {branch}: HTTP {status} {message}'.rstrip()
-                      + ' (gh cannot see the repository or branch)')
-    for rule in data:
-        if isinstance(rule, dict) and rule.get('type') == 'required_status_checks':
-            checks = (rule.get('parameters') or {}).get('required_status_checks') or []
-            names.update(c.get('context') for c in checks if c.get('context'))
-    status, data, message = gh_api_status(f'repos/{slug}/branches/{ref}/protection/required_status_checks')
-    if status == 200 and isinstance(data, dict):
-        names.update(data.get('contexts') or [])
-        names.update(c.get('context') for c in data.get('checks') or [] if c.get('context'))
-    elif not (status == 404 and message == 'Branch not protected'):
-        raise GhError(f'branch protection for {slug} {branch}: HTTP {status} {message}'.rstrip())
-    return names
-
-
-def main_required_state(repo, required, branch="main"):
-    """('red'|'green'|'undecided', detail) for the latest run of each required check on the landing head,
-    read from the check runs and the legacy commit statuses; a name red in either is red. Only `success` is green; pending, missing, skipped or neutral decide
-    nothing. GhError when the check runs cannot be read."""
-    slug = origin_slug(repo)
-    ref = quote(branch, safe='')
-    result = run(['gh', 'api', '--paginate', f'repos/{slug}/commits/{ref}/check-runs?per_page=100',
-                  '--jq', '.check_runs[] | {id, name, status, conclusion}'], cwd=str(repo))
-    if result.returncode != 0:
-        raise GhError(f'check runs on {branch}: {(result.stderr or result.stdout).strip()[:200]}')
-    latest = {}
-    for line in result.stdout.splitlines():
-        if not line.strip():
-            continue
-        try:
-            item = json.loads(line)
-        except ValueError:
-            raise GhError('check runs on main returned invalid JSON')
-        name = item.get('name') if isinstance(item, dict) else None
-        if name in required and (name not in latest or (item.get('id') or 0) > (latest[name].get('id') or 0)):
-            latest[name] = item
-    # Legacy commit statuses: a required name may report only here, or here as well as a check run.
-    result = run(['gh', 'api', f'repos/{slug}/commits/{ref}/status?per_page=100'], cwd=str(repo))
-    if result.returncode != 0:
-        raise GhError(f'commit statuses on {branch}: {(result.stderr or result.stdout).strip()[:200]}')
+def outside_owner_accounts(repo):
+    """True only for a repository whose origin is positively a GitHub repository under an account the
+    owner-accounts file does not list. No origin, an origin that cannot be placed (another forge, an odd URL)
+    and a missing accounts file all stay under the personal rules."""
+    accounts = owner_accounts()
+    if not accounts:
+        return False
     try:
-        statuses = json.loads(result.stdout or '{}').get('statuses') or []
-    except (ValueError, AttributeError):
-        raise GhError('commit statuses on main returned invalid JSON')
-    outcomes = {}
-    for name, r in latest.items():
-        done = r.get('status') == 'completed'
-        outcomes.setdefault(name, []).append(
-            'red' if done and r.get('conclusion') in FAILURE_CONCLUSIONS
-            else 'green' if done and r.get('conclusion') == 'success' else 'undecided')
-    for item in statuses:
-        name = item.get('context') if isinstance(item, dict) else None
-        if name in required:
-            state = item.get('state')
-            outcomes.setdefault(name, []).append(
-                'red' if state in ('failure', 'error') else 'green' if state == 'success' else 'undecided')
-    red = sorted(n for n, o in outcomes.items() if 'red' in o)
-    if red:
-        return 'red', ', '.join(red)
-    if set(outcomes) == required and all(set(o) == {'green'} for o in outcomes.values()):
-        return 'green', 'every required check succeeded'
-    return 'undecided', 'required checks pending, missing or not a pass'
+        owner = origin_slug(repo).split('/')[0].lower()
+    except GhError:
+        return False
+    return owner not in accounts
 
 
-def split_globs(value):
-    """Comma-separated items; a comma inside `{...}` belongs to the glob. Backticks are stripped."""
-    items, depth, start = [], 0, 0
-    for i in range(len(value) + 1):
-        c = value[i] if i < len(value) else None
-        if c == '{':
-            depth += 1
-        elif c == '}':
-            depth = max(0, depth - 1)
-        elif (c == ',' and depth == 0) or c is None:
-            item = value[start:i].strip().strip('`').strip()
-            if item:
-                items.append(item)
-            start = i + 1
-    return items
+def effective_tracker(repo, keys):
+    """The tracker a LOOP.md's `keys` name: `tracker:`, else GitHub for a `tracker-repo:`, else Backlog
+    when the repository has a `backlog/` directory and GitHub otherwise."""
+    if 'tracker' in keys:
+        return keys['tracker']
+    if 'tracker-repo' in keys:
+        return 'github'
+    return 'backlog' if (Path(repo) / 'backlog').is_dir() else 'github'
 
 
 # --- LOOP.md ---------------------------------------------------------------------------------
@@ -345,43 +347,69 @@ def lint_loopmd(path, offline, repo_arg=None):
     text = read_text(report, path)
     if text is None:
         return report
+    repo = Path(repo_arg) if repo_arg else Path(path).resolve().parent
+    # The personal key set and the size cap hold for the owner's repositories only.
+    personal = not outside_owner_accounts(repo)
     size = len(text.encode('utf-8'))
-    if size > LOOPMD_MAX:
+    if personal and size > LOOPMD_MAX:
         report.error('L1', 1, f'LOOP.md is {size} bytes, limit {LOOPMD_MAX}')
-    keys, where = parse_loopmd_keys(text)
+    entries = opening_entries(text)
+    keys = {k: v for k, (v, _, _) in entries.items()}
+    where = {k: n for k, (_, n, _) in entries.items()}
     first = text.splitlines()[0] if text else ''
     if not re.match(r'^# Loop: \S', first):
         report.error('L2', 1, 'line 1 must be `# Loop: <repo>`')
 
     def need(key, check, hint):
         if key not in keys:
-            report.error('L2', 1, f'missing key `{key}:` ({hint})')
+            if personal:
+                report.error('L2', 1, f'missing key `{key}:` ({hint})')
         elif not check(keys[key]):
             report.error('L2', where[key], f'invalid `{key}:` value {keys[key]!r} ({hint})')
 
     need('tier', lambda v: v in ('routine', 'guarded'), 'routine | guarded')
     need('gate', lambda v: bool(v) and v.lower() != 'none', 'the local gate command')
     need('ci-required', lambda v: bool(v), 'required check names, or none')
+    # A GitHub tracker lands by pull request: `tracker: github`, a `tracker-repo:` (which implies it), or
+    # neither `tracker:` nor a `backlog/` directory (contract section 6). The last is pull request by
+    # default: an explicit `landing: direct` contradicts it, but it needs no `landing:` and no `## Queue`
+    # (its queue may live in another repository a private charter names).
+    declared = 'tracker' in keys or 'tracker-repo' in keys
+    github = effective_tracker(repo, keys) == 'github' and declared
+    at = where.get('tracker', where.get('tracker-repo', 1))
     if 'tracker' in keys:
         need('tracker', lambda v: v in TRACKERS, ' | '.join(TRACKERS))
+    if not declared and effective_tracker(repo, keys) == 'github' and keys.get('landing') == 'direct':
+        report.error('L2', where['landing'], '`landing: direct` contradicts the pull request default of a '
+                                             'repository with no `tracker:` key and no `backlog/` directory')
+    if github:
         queue = h2_sections(text).get('Queue')
         lines = text.splitlines()
         body = '\n'.join(lines[queue[0] - 1:queue[1]]) if queue else ''
         # The body names the queue command (inline code or a fenced block) and says only the root writes.
-        if keys['tracker'] == 'github' and (
-                not re.search(r'`[^`\n]+`|^\s*(```|~~~)', body, re.M)
+        if (not re.search(r'`[^`\n]+`|^\s*(```|~~~)', body, re.M)
                 or not re.search(r'\bonly the root\b|\broot-only\b', body, re.I)):
-            report.error('L2', where['tracker'], '`tracker: github` needs a `## Queue` section with a body naming '
-                                                 'the queue command and the root-only writes')
-        if keys['tracker'] == 'github' and keys.get('landing') != 'pr':
-            report.error('L2', where['tracker'], '`tracker: github` needs `landing: pr`: every change to such a '
-                                                 'repository lands by pull request')
+            report.error('L2', at,
+                         'a GitHub tracker needs a `## Queue` section with a body naming '
+                         'the queue command and the root-only writes')
+        landing = keys.get('landing')
+        if landing != 'pr' and not (landing is None and 'tracker-repo' in keys):
+            report.error('L2', at,
+                         'a GitHub tracker needs `landing: pr`: every change to such a repository lands by '
+                         'pull request (`tracker-repo:` implies it)')
     if 'tracker-repo' in keys:
         need('tracker-repo', lambda v: bool(TRACKER_REPO.fullmatch(v)), 'OWNER/REPO')
-        if keys.get('tracker') != 'github':
+        if 'tracker' in keys and keys['tracker'] != 'github':
             report.error('L2', where['tracker-repo'], '`tracker-repo:` applies only with `tracker: github`')
     if 'reviewer' in keys:
-        need('reviewer', lambda v: v in ('coderabbit', 'copilot', 'kodus'), 'coderabbit | copilot | kodus')
+        if re.fullmatch(r'code[ _-]?rabbit', keys['reviewer'], re.I):
+            report.error('L2', where['reviewer'], f'invalid `reviewer:` value {keys["reviewer"]!r}: the '
+                         'CodeRabbit profile is retired (copilot | cursor)')
+        elif keys['reviewer'] == 'kodus':
+            report.error('L2', where['reviewer'], "invalid `reviewer:` value 'kodus': the Kodus profile is "
+                         'retired (copilot | cursor)')
+        else:
+            need('reviewer', lambda v: v in ('copilot', 'cursor'), 'copilot | cursor')
     if 'landing' in keys:
         need('landing', lambda v: v in ('direct', 'pr'), 'direct | pr')
     if 'landing-branch' in keys:
@@ -402,24 +430,20 @@ def lint_loopmd(path, offline, repo_arg=None):
             report.error('L2', where[key], f'`{key}:` is empty; drop the key or name the command')
     if 'merge-hold' in keys and keys.get('landing') != 'pr':
         report.error('L2', where['merge-hold'], '`merge-hold:` applies only to PR landing')
-    # Kept for LOOP.md files that still carry them; only the pre-green eligibility rule needed them.
-    for key in ('release-on-push', 'deploy-on-push'):
-        if key in keys and keys[key] not in ('yes', 'no'):
-            report.error('L2', where[key], f'invalid `{key}:` value {keys[key]!r} (yes | no)')
+    if 'release-on-push' in keys and keys['release-on-push'] not in ('yes', 'no'):
+        report.error('L2', where['release-on-push'], f'invalid `release-on-push:` value '
+                                                     f'{keys["release-on-push"]!r} (yes | no)')
     need('grafana-stack', lambda v: v == 'none' or bool(re.match(r'^[a-z0-9][a-z0-9-]*$', v)),
          'a stack slug or none')
-    if 'ci-status' in keys and '{sha}' not in keys['ci-status']:
-        report.error('L2', where['ci-status'], '`ci-status:` must contain {sha} for the exact commit')
+    check_command_values(report, 'L2', {k: v for k, v in entries.items() if k in COMMAND_KEYS})
     if 'ci-required' in keys and ci_required_names(keys['ci-required']) and 'ci-status' not in keys:
         try:
-            origin_slug(Path(repo_arg) if repo_arg else Path(path).resolve().parent)
+            origin_slug(repo)
         except NotOnGitHub:
             report.warn('L2', where['ci-required'], 'non-GitHub origin has required CI but no `ci-status:` '
                                                    'command; CI waits cannot verify a SHA')
         except GhError:
             pass  # The online required-check read below diagnoses unreadable origins.
-    if 'ci-max-minutes' in keys and not re.match(r'^[1-9][0-9]*$', keys['ci-max-minutes']):
-        report.error('L2', where['ci-max-minutes'], 'invalid `ci-max-minutes:`, want a positive integer')
     if 'guarded-paths' in keys and not split_globs(keys['guarded-paths']):
         report.error('L2', where['guarded-paths'], '`guarded-paths:` is empty; drop the key or name globs')
     if 'baseline-red' in keys and not BASELINE_RED.match(keys['baseline-red']):
@@ -433,8 +457,7 @@ def lint_loopmd(path, offline, repo_arg=None):
         else:
             declared = ci_required_names(keys['ci-required'])
             try:
-                actual = required_checks(Path(repo_arg) if repo_arg else Path(path).resolve().parent,
-                                         keys.get("landing-branch", "main"))
+                actual = required_checks(repo, keys.get("landing-branch", "main"))
             except NotOnGitHub:
                 report.info('L2', where['ci-required'], 'required checks not verifiable (not on GitHub)')
             except GhError as error:
@@ -444,8 +467,7 @@ def lint_loopmd(path, offline, repo_arg=None):
                     report.error('L2', where['ci-required'],
                                  f'ci-required {sorted(declared)} differs from required checks '
                                  f'{sorted(actual)}')
-                check_main_ci(report, Path(repo_arg) if repo_arg else Path(path).resolve().parent,
-                              actual, where.get('baseline-red', where['ci-required']), 'baseline-red' in keys,
+                check_main_ci(report, repo, actual, where.get('baseline-red', where['ci-required']), 'baseline-red' in keys,
                               keys.get('landing-branch', 'main'))
 
     for number, line, _ in numbered(text):
@@ -537,7 +559,47 @@ def first_wave_rows(text, span):
     return None if header is None else (header, rows)
 
 
-def lint_charter(path):
+def check_preflight(report, text, line):
+    """`preflight:` (on `line`) is `none` or a list, one privileged command per indented line, in the charter
+    template's shape:
+
+        - <exact command> | proves: <what a pass shows> | rows: <task IDs that need it, or all>
+
+    Each error is reported at the item's own line."""
+    lines = text.splitlines()
+    inline = re.sub(r'^preflight:', '', lines[line - 1]).strip()
+    items = []
+    for number in range(line + 1, len(lines) + 1):
+        raw = lines[number - 1]
+        if not raw.strip():
+            continue
+        if raw[:1] not in (' ', '\t'):
+            break
+        items.append((number, raw.strip()))
+    if inline.lower() == 'none' and not items:
+        return
+    if inline:
+        report.error('C7', line, '`preflight:` is `none` or a list of indented lines, one command each')
+    elif not items:
+        report.error('C7', line, '`preflight:` is empty; write `none` or list the commands')
+    for number, item in items:
+        match = PREFLIGHT_ITEM.match(item)
+        if not match:
+            report.error('C7', number, f'malformed preflight item {item[:60]!r}: want '
+                                       '- <exact command> | proves: <what a pass shows> | rows: <task IDs, or all>')
+            continue
+        command, proves, rows = (part.strip() for part in match.groups())
+        if not command:
+            report.error('C7', number, 'preflight item names no command')
+        if not proves:
+            report.error('C7', number, f'preflight item {command!r} says nothing under `proves:`')
+        tokens = [t.strip() for t in rows.split(',')]
+        if not rows or not all(t == 'all' or TASK_ID.fullmatch(t) or re.fullmatch(r'#\d+', t) for t in tokens):
+            report.error('C7', number, f'preflight item {command!r} needs `rows:` as `all` or task IDs / #N, '
+                                       f'comma separated, got {rows!r}')
+
+
+def lint_charter(path, repo_arg=None, offline=False):
     report = Report(path)
     text = read_text(report, path)
     if text is None:
@@ -573,6 +635,7 @@ def lint_charter(path):
         elif table[1] > FIRST_WAVE_ROWS:
             report.warn('C4', table[0], f'first wave has {table[1]} rows; about {FIRST_WAVE_ROWS} is the limit, '
                                         'the root grows the queue from the board')
+    standing_text = None
     if keys.get('standing'):
         line = where['standing']
         match = STANDING_VALUE.match(keys['standing'])
@@ -581,14 +644,75 @@ def lint_charter(path):
         else:
             standing = Path(match.group(1))
             try:
-                actual = hashlib.sha256(standing.read_bytes()).hexdigest()
+                data = standing.read_bytes()
             except OSError as error:
                 report.error('C5', line, f'standing file unreadable: {error.strerror or error}')
             else:
+                actual = hashlib.sha256(data).hexdigest()
                 if actual != match.group(2):
                     report.error('C5', line, f'standing file sha256 is {actual}, the charter records '
                                              f'{match.group(2)}')
+                else:
+                    standing_text = data.decode('utf-8', 'replace')
+                    standing_report = Report(str(standing))
+                    lint_standing_commands(standing_report, standing_text)
+                    report.errors += standing_report.errors
+
+    # protocol v4 and its charter keys
+    if keys.get('protocol') != PROTOCOL:
+        if 'protocol' not in keys:
+            report.error('C6', 1, f'missing key `protocol:` (want `protocol: {PROTOCOL}`)')
+        else:
+            report.error('C6', where['protocol'], f'invalid `protocol:` {keys["protocol"]!r}, want {PROTOCOL}')
+    if 'preflight' in keys:
+        check_preflight(report, text, where['preflight'])
+
+    # What loop-land will read for this repository: LOOP.md, then the Standing file's `## Commands`.
+    repo = Path(repo_arg) if repo_arg else Path(path).resolve().parent.parent
+    loopmd = repo / 'LOOP.md'
+    loop_keys = {}
+    if loopmd.is_file():
+        loop_keys = opening_keys(loopmd.read_text(encoding='utf-8', errors='replace'))[0]
+    resolved = {k: v for k, v in loop_keys.items() if k in COMMAND_KEYS}
+    if standing_text is not None:
+        resolved.update(standing_commands(standing_text))
+    line = where.get('standing', 1)
+    untrusted = bool(keys.get('standing')) and standing_text is None  # C5 has already said so
+    if not untrusted and resolved.get('deploy-on-push') == 'yes' and not resolved.get('deploy-verify'):
+        report.error('C8', line, '`deploy-on-push: yes` but no `deploy-verify:` resolves from LOOP.md or the '
+                                 'Standing file\'s `## Commands`; name the deploy read, or `none`')
+    check_main_readable(report, line, repo, resolved, loop_keys.get('landing-branch', 'main'), offline)
     return report
+
+
+def check_main_readable(report, line, repo, resolved, branch, offline):
+    """The charter fails when main's state cannot be read: `ci-required:` is not none, there is no
+    `ci-status:`, and some required check never reports on main's head (the landing tool needs every name), or
+    origin is not on GitHub, or gh fails."""
+    required = resolved.get('ci-required')
+    if (required is not None and not ci_required_names(required)) or resolved.get('ci-status'):
+        return
+    try:
+        origin_slug(repo)
+    except GhError as error:
+        report.error('C9', line, f'main\'s state cannot be read: {error}, and there is no `ci-status:`')
+        return
+    if offline:
+        report.info('C9', line, 'skipped (--offline): main\'s state was not read')
+        return
+    try:
+        names = ci_required_names(required) if required is not None else required_checks(repo, branch)
+        if not names:
+            return
+        latest, statuses = read_check_inputs(repo, names, branch)
+    except GhError as error:
+        report.error('C9', line, f'main\'s state cannot be read: {error}')
+        return
+    reporting = set(latest) | ({i.get('context') for i in statuses if isinstance(i, dict)} & names)
+    missing = sorted(names - reporting)
+    if missing:
+        report.error('C9', line, f'required check(s) {", ".join(missing)} never report on {branch}\'s head and '
+                                 'there is no `ci-status:`, so main\'s state cannot be read')
 
 
 # --- queue (Q) -------------------------------------------------------------------------------
@@ -607,12 +731,12 @@ def repo_loopmd_keys(repo):
     path = Path(repo) / 'LOOP.md'
     if not path.exists():
         return {}
-    return parse_loopmd_keys(path.read_text(encoding='utf-8', errors='replace'))[0]
+    return opening_keys(path.read_text(encoding='utf-8', errors='replace'))[0]
 
 
 def repo_tracker(repo):
-    """`backlog` or `github`: the `tracker:` key of the repository's LOOP.md, `backlog` when absent."""
-    return repo_loopmd_keys(repo).get('tracker', 'backlog')
+    """`backlog` or `github`: the tracker the repository's LOOP.md names, else by its `backlog/` directory."""
+    return effective_tracker(repo, repo_loopmd_keys(repo))
 
 
 def ready_rows(text, tracker='backlog'):
@@ -691,7 +815,7 @@ def lint_queue(charter_path, queue_path, repo_arg=None, tracker_repo_arg=None):
         return report
     repo = Path(repo_arg) if repo_arg else Path(charter_path).resolve().parent.parent
     loop_keys = repo_loopmd_keys(repo)
-    tracker = loop_keys.get('tracker', 'backlog')
+    tracker = effective_tracker(repo, loop_keys)
     # The option beats the charter key, which beats LOOP.md; none of them falls back to origin when malformed.
     # Presence, not truthiness: an empty value is malformed, never "unset".
     outside = tracker_repo_arg if tracker_repo_arg is not None else keys.get('tracker-repo')
@@ -702,8 +826,7 @@ def lint_queue(charter_path, queue_path, repo_arg=None, tracker_repo_arg=None):
     if outside is not None and 'tracker' not in loop_keys:
         tracker = 'github'  # a repository with no tracker key of its own, queued from another repository
     if tracker_repo is not None and tracker != 'github':
-        named = f'names tracker {tracker!r}' if 'tracker' in loop_keys else 'has no tracker key (read as backlog)'
-        report.error('Q4', 1, f'tracker-repo is set but LOOP.md {named}; it applies only with '
+        report.error('Q4', 1, f'tracker-repo is set but LOOP.md names tracker {tracker!r}; it applies only with '
                               '`tracker: github`; nothing was checked')
         return report
     if tracker not in TRACKERS:
@@ -744,20 +867,121 @@ def lint_queue(charter_path, queue_path, repo_arg=None, tracker_repo_arg=None):
     return report
 
 
+# --- parked ----------------------------------------------------------------------------------
+
+def clean_reason(text):
+    """A park's reason: the rest of its line after the task, minus a leading `(title)` and separators."""
+    text = re.sub(r'^\s*\([^)]*\)', '', text)
+    return re.sub(r'\s+', ' ', re.sub(r'^[\s:;,.\-\u2013\u2014|]+', '', text)).strip()
+
+
+def parked_items(text):
+    """([(task, reason, line)], [(line, text)]): the parks in the `## Parked` sections of a closeout (any
+    heading starting with `Parked`), and the lines that name a task but that no rule here could read as a
+    park. A park is a flush-left bullet or numbered item that opens with a task ID or `#N` (several, as in
+    `- WID-4, WID-5: x`, each parked) or a table row naming one; an indented line under it continues its
+    reason."""
+    spans = [span for name, span in h2_sections(text).items() if re.match(r'parked\b', name, re.IGNORECASE)]
+    items, unparsed, current = [], [], []
+    for number, line, fenced in numbered(text):
+        if fenced or not any(a <= number <= b for a, b in spans) or not line.strip() or re.match(r'#{1,6}\s', line):
+            continue
+        named = PARKED_ANY_ID.search(line)
+        if line.lstrip().startswith('|') and not line[:1].isspace():
+            current = []
+            if re.match(r'^\|[\s:|-]+\|?$', line.strip()) or not named:
+                continue  # the separator, or a header row
+            cells = [c.strip() for c in line.strip().strip('|').split('|')]
+            first = next(i for i, c in enumerate(cells) if PARKED_ANY_ID.search(c))
+            task = PARKED_ANY_ID.search(cells[first]).group(0)
+            rest = ' | '.join(c for i, c in enumerate(cells) if i != first and c)
+            items.append((task.upper() if task[0] != '#' else task, clean_reason(rest), number))
+            current = [len(items) - 1]
+            continue
+        bullet = PARKED_BULLET.match(line)
+        if bullet:
+            ids = [m.group(0) for m in PARKED_ANY_ID.finditer(bullet.group(1))]
+            current = []
+            for task in ids:
+                items.append((task if task[0] == '#' else task.upper(), bullet.group(2), number))
+                current.append(len(items) - 1)
+        elif line[:1] in (' ', '\t'):
+            if current:
+                for index in current:
+                    task, reason, at = items[index]
+                    items[index] = (task, reason + ' ' + line.strip(), at)
+            elif named:
+                unparsed.append((number, line.strip()))
+        else:
+            current = []
+            if named:
+                unparsed.append((number, line.strip()))
+    return [(task, clean_reason(reason), at) for task, reason, at in items], unparsed
+
+
+def lint_parked(repo):
+    """List the tasks the last three closeouts in `<repo>/codex/` parked: each with its latest reason and
+    the number of closeouts in a row that parked it, counted back from the newest closeout that did. A
+    line of a `## Parked` section that names a task but cannot be read as a park is reported as unparsed
+    (a warning with its file and line), and a closeout that cannot be read is reported once and skipped."""
+    report = Report(str(Path(repo) / 'codex'))
+    codex = Path(repo) / 'codex'
+    found = []
+    for entry in codex.iterdir() if codex.is_dir() else []:
+        match = CLOSEOUT_FILE.match(entry.name)
+        if match and entry.is_file():
+            found.append((match.group(1), int(match.group(2)), entry))
+    recent = sorted(found, key=lambda f: (f[0], f[1]), reverse=True)[:PARKED_WINDOW]  # newest first
+    if not recent:
+        report.info('P0', 1, 'no closeout files in codex/, so nothing is parked')
+        return report
+    parked, skipped, unreadable = [], 0, 0  # per closeout, newest first: {task: reason}
+    for _, _, entry in recent:
+        try:
+            text = entry.read_bytes().decode('utf-8')
+        except (OSError, UnicodeDecodeError) as error:
+            Report(str(entry)).warn('IO', 1, f'closeout skipped, cannot be read: {getattr(error, "strerror", None) or error}')
+            parked.append({})
+            unreadable += 1
+            continue
+        items, unparsed = parked_items(text)
+        for number, line in unparsed:
+            Report(str(entry)).warn('P1', number, f'unparsed park, not read as a task: {line[:80]!r}')
+        skipped += len(unparsed)
+        parked.append({task: reason for task, reason, _ in items})
+    tasks = []
+    for closeout in parked:
+        tasks += [t for t in closeout if t not in tasks]
+    for task in tasks:
+        newest = next(i for i, closeout in enumerate(parked) if task in closeout)
+        run_length = 0
+        while newest + run_length < len(parked) and task in parked[newest + run_length]:
+            run_length += 1
+        reason = parked[newest][task] or '(no reason given)'
+        print(f'{task} parked {run_length} closeout(s) in a row, latest {recent[newest][2].name}: {reason}')
+    report.info('P0', 1, f'{len(tasks)} task(s) parked in the last {len(recent)} closeout(s); {skipped} unparsed '
+                         f'line(s) and {unreadable} unreadable closeout(s) reported above')
+    return report
+
+
 # --- entry -----------------------------------------------------------------------------------
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument('kind', choices=('loopmd', 'charter', 'queue'))
-    parser.add_argument('paths', nargs='+', help='loopmd: LOOP.md; charter: charter.md; queue: charter.md QUEUE.md')
-    parser.add_argument('--offline', action='store_true', help='loopmd only: skip the checks that need gh')
+    parser.add_argument('kind', choices=('loopmd', 'charter', 'queue', 'parked'))
+    parser.add_argument('paths', nargs='*', help='loopmd: LOOP.md; charter: charter.md; queue: charter.md '
+                                                 'QUEUE.md; parked: none, it takes --repo')
+    parser.add_argument('--offline', action='store_true',
+                        help='loopmd and charter: skip the checks that need gh')
     parser.add_argument('--tracker-repo', metavar='OWNER/REPO',
                         help='queue only: read the issues of this repository instead of origin\'s')
     parser.add_argument('--repo', help='repository checkout (default: the parent of the codex/ folder)')
     args = parser.parse_args(argv)
     if args.tracker_repo is not None and args.kind != 'queue':
         parser.error('--tracker-repo applies to queue only')
-    wanted = 2 if args.kind == 'queue' else 1
+    wanted = {'queue': 2, 'parked': 0}.get(args.kind, 1)
+    if args.kind == 'parked' and not args.repo:
+        parser.error('parked needs --repo')
     if len(args.paths) != wanted:
         parser.error(f'{args.kind} takes {wanted} path argument(s)')
     if args.kind == 'loopmd':
@@ -765,7 +989,11 @@ def main(argv=None):
             print('loop-lint: --offline, the gh-backed checks are skipped and said so below', file=sys.stderr)
         report = lint_loopmd(args.paths[0], args.offline, args.repo)
     elif args.kind == 'charter':
-        report = lint_charter(args.paths[0])
+        if args.offline:
+            print('loop-lint: --offline, the gh-backed checks are skipped and said so below', file=sys.stderr)
+        report = lint_charter(args.paths[0], args.repo, args.offline)
+    elif args.kind == 'parked':
+        report = lint_parked(args.repo)
     else:
         report = lint_queue(args.paths[0], args.paths[1], args.repo, args.tracker_repo)
     return 1 if report.errors else 0

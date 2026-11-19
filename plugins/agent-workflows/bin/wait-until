@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""wait-until: a bounded wait that cannot hang silently.
+
+    wait-until --timeout <duration> --what "<description>" [--every <seconds>] -- <test command>
+
+Runs the test command every --every seconds (default 30) until it exits 0 or --timeout passes.
+Each try is killed, with its whole process group, if it runs longer than the interval. Exit codes:
+
+    0    the test command succeeded
+    3    the test command exited 2 ("I cannot tell") or could not be started: the wait stops at once
+    124  the timeout passed; the message names what was awaited and says to check by hand
+    2    the arguments were refused (usage error, including a missing --timeout)
+
+The test command runs as argv with no shell and no stdin: use `sh -c '...'` for shell syntax. Every
+try's whole process group is killed when the try ends, whatever its outcome, so nothing it started
+outlives it. A probe that itself exits 2 on "not yet" (for example `grep -q` on a missing file) stops
+the wait with 3: wrap it, or use `test -e`. An exit of 126 or 127 means the command could not run
+and also stops the wait with 3.
+
+Wait on a process id, an output file or a completion marker, never on `pgrep -f` with a pattern
+that appears in the watcher's own command line. Standard library only, Python 3.8 or newer.
+"""
+
+import argparse
+import math
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+
+DEFAULT_EVERY = 30.0
+CANNOT_TELL = 2
+EXIT_CANNOT_TELL = 3
+EXIT_TIMEOUT = 124
+UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+PART = re.compile(r"(\d+(?:\.\d+)?)([smhd])")
+
+
+def parse_duration(text: str) -> float:
+    """Seconds in "90", "30s", "5m", "2h" or "1h30m"; anything else, zero included, is refused."""
+    text = text.strip().lower()
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        seconds = float(text)
+    else:
+        parts = PART.findall(text)
+        if not parts or "".join(number + unit for number, unit in parts) != text:
+            raise argparse.ArgumentTypeError(f"not a duration: {text!r} (use 90, 30s, 5m, 2h or 1h30m)")
+        seconds = sum(float(number) * UNITS[unit] for number, unit in parts)
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("a duration must be a finite number above zero")
+    return seconds
+
+
+def positive_seconds(text: str) -> float:
+    try:
+        seconds = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number of seconds: {text!r}")
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("the interval must be above zero")
+    return seconds
+
+
+def described(text: str) -> str:
+    if not text.strip():
+        raise argparse.ArgumentTypeError("say what is being waited for: --what must not be empty")
+    return text
+
+
+def humanize(seconds: float) -> str:
+    seconds = int(round(seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    return "".join(f"{n}{u}" for n, u in ((hours, "h"), (minutes, "m"), (secs, "s")) if n) or "0s"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="wait-until",
+        usage='wait-until --timeout <duration> --what "<description>" [--every <seconds>] -- <test command>',
+        description="Run a test command until it exits 0, for at most --timeout. "
+                    "A test command that exits 2 means 'cannot tell' and ends the wait with exit 3, "
+                    "so a probe that exits 2 on 'not yet' (grep -q on a missing file) must be wrapped, "
+                    "or use test -e. The command runs without a shell: use sh -c '...' for shell syntax.",
+        epilog="Exit codes: 0 done, 3 cannot tell (test exit 2, 126 or 127), 124 timed out, 2 usage.")
+    parser.add_argument("--timeout", required=True, type=parse_duration, metavar="DURATION",
+                        help="how long to wait in total: 90, 30s, 5m, 2h, 1h30m (required)")
+    parser.add_argument("--what", required=True, type=described,
+                        help="what is being waited for, named in the timeout message (required)")
+    parser.add_argument("--every", type=positive_seconds, default=DEFAULT_EVERY, metavar="SECONDS",
+                        help=f"seconds between tries, and the most one try may run (default {DEFAULT_EVERY:g})")
+    return parser
+
+
+TERM_GRACE = 0.5  # how long a try that overran its limit gets to exit on SIGTERM before SIGKILL
+
+
+def kill_group(process: subprocess.Popen) -> None:
+    """SIGKILL the try's whole process group, whatever is left in it, and reap the leader."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def run_try(command: list, limit: float):
+    """Run the test command once. Returns its exit status, "timeout" when it overran the limit, or
+    "error" when it could not be started. Whatever the outcome, and on every way out (a signal to
+    wait-until included), the try's process group is killed afterwards, so nothing it started
+    outlives it or holds our output open."""
+    try:
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=True)
+    except OSError as error:
+        print(f"wait-until: cannot run the test command {command[0]!r}: {error.strerror or error}",
+              file=sys.stderr)
+        return "error"
+    try:
+        try:
+            return process.wait(timeout=limit)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                process.wait(timeout=TERM_GRACE)
+            except subprocess.TimeoutExpired:
+                pass
+            return "timeout"
+    finally:
+        kill_group(process)
+
+
+def say(message: str) -> None:
+    print(f"wait-until: {message}", file=sys.stderr, flush=True)
+
+
+def main(argv: list) -> int:
+    split = argv.index("--") if "--" in argv else len(argv)
+    args = build_parser().parse_args(argv[:split])  # first, so --help and a missing --timeout speak for themselves
+    command = argv[split + 1:]
+    if not command:
+        build_parser().error("the test command is required after `--`")
+    what = args.what
+
+    def stop(signum, frame):
+        raise SystemExit(128 + signum)
+
+    for name in ("SIGTERM", "SIGHUP", "SIGQUIT", "SIGUSR1", "SIGUSR2"):
+        signal.signal(getattr(signal, name), stop)
+
+    started = time.monotonic()
+    deadline = started + args.timeout
+    say(f"waiting for {what} (up to {humanize(args.timeout)}, every {args.every:g}s)")
+    tries = 0
+    while True:
+        tick = time.monotonic()
+        tries += 1
+        outcome = run_try(command, min(args.every, max(deadline - tick, 0.001)))
+        elapsed = humanize(time.monotonic() - started)
+        if outcome == 0:
+            say(f"{what}: done after {elapsed} ({tries} {'try' if tries == 1 else 'tries'})")
+            return 0
+        if outcome == "error" or outcome in (CANNOT_TELL, 126, 127):
+            reason = ("could not be started" if outcome == "error" else
+                      f"exited {outcome} (could not run)" if outcome in (126, 127) else
+                      f"exited {CANNOT_TELL} (cannot tell)")
+            say(f"CANNOT TELL after {elapsed}: the test command {reason}, so the wait for {what} "
+                f"stops here. Check by hand.")
+            return EXIT_CANNOT_TELL
+        now = time.monotonic()
+        if now >= deadline:
+            break
+        # Fixed interval: the next try starts `every` after this one began.
+        time.sleep(max(0.0, min(tick + args.every, deadline) - now))
+        if time.monotonic() >= deadline:
+            break
+    say(f"TIMED OUT after {humanize(min(time.monotonic() - started, args.timeout))} (limit {humanize(args.timeout)}, "
+        f"{tries} {'try' if tries == 1 else 'tries'}) waiting for: {what}. "
+        f"The wait ended, not necessarily the thing: check by hand whether {what} is still running.")
+    return EXIT_TIMEOUT
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

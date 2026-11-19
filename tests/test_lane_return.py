@@ -110,7 +110,7 @@ class LaneReturnHook(unittest.TestCase):
 
     def test_named_review_record_and_legacy_form_are_both_validated(self):
         candidate = {k: v for k, v in self.good.items() if k != "dsreview"}
-        review = {"provider": "kodus+local-agent", "verdict": "PASS", "major": 0,
+        review = {"provider": "local-agent", "verdict": "PASS", "major": 0,
                   "fixed": 0, "disputed": 0, "evidence": str(Path(self.tmp.name) / "review.json")}
         self.assertEqual(self.stop({**candidate, "review": review}), {})
         self.assertEqual(self.stop({**candidate, "review": None}), {})
@@ -122,6 +122,36 @@ class LaneReturnHook(unittest.TestCase):
                 self.assertBlocked(self.stop({**candidate, "review": {**review, **change}}), "review")
         for bad in ({"verdict": "PASS", "major": True, "fixed": 0, "disputed": 0}, {}):
             self.assertBlocked(self.stop({**self.good, "dsreview": bad}), "dsreview")
+
+    def test_read_only_returns_written_as_their_agent_text_says_pass(self):
+        """A reviewer or scout runs no review route, so its agent text must tell it to return a null
+        review record: a record whose evidence says "the verdict is in this message" is refused."""
+        candidate = {k: v for k, v in self.good.items() if k != "dsreview"}
+        for role in ("reviewer", "scout"):
+            with self.subTest(role=role):
+                text = " ".join((PLUGIN / "agents" / f"{role}.md").read_text(encoding="utf-8").split())
+                self.assertIn('Set `"review":null`: you run no review route', text)
+                self.assertNotIn("says the verdict is in this message", text)
+                as_told = {**candidate, "patch": None, "patch_sha256": None, "review": None}
+                self.assertEqual(self.stop(as_told, role), {})
+                in_message = {"provider": "none", "verdict": "PASS", "major": 0, "fixed": 0, "disputed": 0,
+                              "evidence": "the verdict is in this message"}
+                self.assertBlocked(self.stop({**as_told, "review": in_message}, role),
+                                   "review evidence must be an absolute artifact path")
+
+    def test_optional_tracker_field_is_a_string_or_an_object_and_nothing_else(self):
+        for role in ROLES:
+            for tracker in ("github #4321", {"issue": 4321, "state": "ready"}):
+                with self.subTest(role=role, tracker=tracker):
+                    self.assertEqual(self.stop({**self.good, "tracker": tracker}, role), {})
+        self.assertEqual(self.stop(self.good), {})  # absent stays valid: the field is optional
+        for tracker in (4321, ["4321"], True, None):
+            with self.subTest(tracker=tracker):
+                self.assertBlocked(self.stop({**self.good, "tracker": tracker}), "tracker")
+        # A tracker field does not rescue an otherwise malformed block, and the version stays 3.
+        self.assertBlocked(self.stop({**self.good, "tracker": "github #4321", "v": 4}), "v must be 3")
+        self.assertBlocked(self.stop({k: v for k, v in {**self.good, "tracker": "x"}.items() if k != "check"}),
+                           "check")
 
     def test_wrong_types_duplicate_keys_and_ambiguous_blocks_are_not_returns(self):
         for change in ({"exit": False}, {"v": True}, {"questions": "none"}, {"dsreview": {}},

@@ -3,8 +3,9 @@
 `dsreview` is a code reviewer for loop lanes. It sends one candidate change and the brief it was
 written against to DeepSeek Flash through Cloudflare AI Gateway or OpenRouter, lets the model read the repository
 at the candidate state through three read-only tools (`read_file`, `grep`, `list_files`), and prints
-a JSON verdict: PASS or FAIL with findings. The lane template in `protocol/loop/lane.md` tells a
-lane to run it on its candidate before handing back.
+a JSON verdict: PASS or FAIL with findings. The lane template in `protocol/loop/lane.md` has a local
+review step whose exact command the planner freezes for each run; `dsreview` is one command that can
+fill it.
 
 On a replay of 59 reviews that Opus reviewer lanes had already done, tool-using DeepSeek Flash
 matched them: each caught 8 of the 11 known defects, neither blocked a sound change, and a review

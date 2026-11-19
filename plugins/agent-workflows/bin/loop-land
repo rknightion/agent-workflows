@@ -1,0 +1,1005 @@
+#!/usr/bin/env python3
+"""The checks before a merge and the record after it, for one landing at a time.
+
+    loop-land ready   --repo P --run-dir D --pr N --head SHA --issues N,... [--fix-forward REASON] [--timeout MIN]
+    loop-land verify  --repo P --run-dir D --pr N
+    loop-land abandon --repo P --run-dir D --pr N --reason TEXT
+    loop-land summary --repo P --run-dir D [--check]
+
+`ready` decides whether a pull request may merge now and, on `go`, takes the repository's landing slot
+and prints the merge command for the root to run. The root merges with its own command: this tool has
+no merge command of its own and never merges. `verify` records what the merge did to main and, where
+the repository deploys, to the deploy. Direct mode, where the root pushes main itself, takes `--sha SHA`
+in place of `--pr` (and `--head`) on `ready`, `verify` and `abandon`.
+
+Each command prints one line of JSON (`outcome`, `exit`, `detail`, ...) and exits with the code below.
+Every outcome also appends one event to `<run-dir>/landings.jsonl`; a landing's state is its last event,
+not counting an `error` event, which means the tool could not tell. `abandon --reason` is also written to
+its `abandoned` event as an optional `reason` key, after the fixed keys; the automatic abandon of a stale
+slot writes none, and every reader of the ledger ignores a key it does not know.
+
+    ready    0 go   20 held (main red)   21 stale-head   22 checks-failed   23 main-undecided   24 slot-busy
+    verify   0 landed   10 main-red   11 unread   12 deploy-failed   20 not-merged   21 wrong-head
+    any      30 error: the tool could not tell (a failing gh, an unreadable file); rerun the same command
+    abandon  30 also when the pull request is already merged: run verify instead
+    summary  0; with --check, 1 when GitHub shows a merge from this run's landing branches the ledger lacks
+
+Where the commands come from. The repository's command keys (`ci-required`, `ci-status`, `ci-max-minutes`,
+`deploy-on-push`, `deploy-paths`, `deploy-verify`) are read from `LOOP.md` at the tip of origin's main, and
+from the `## Commands` section of the Standing file the run's charter cites by hash, which overrides them.
+They are never read from the pull request's head. With no `ci-required` the required checks are read from
+the repository's rulesets. `ci-status` and `deploy-verify` are shell commands with `{sha}` replaced; they
+run in a temporary detached worktree at main's tip, made once per invocation and removed on exit, error or
+signal, never in the caller's checkout (which may have a pull request branch checked out). Exit 0 is a pass
+(`ci-status`: green, `deploy-verify`: synced), 1 a fail, 2 "cannot tell". When several charters match the
+run directory, the newest by name is read; every JSON line has a `standing` key naming the Standing file
+read, or null when none was.
+
+The landing slot is `loop-land.slot.json` in the repository's common git directory, replaced by rename so
+it is never half-written. A second landing refuses with `slot-busy` until the first is verified or abandoned.
+
+An uncaught error exits 30 like any other `error` (1 is reserved for `summary --check`). A ledger line that
+cannot be parsed is left in place; `error` events are still appended after it and the JSON says what is wrong.
+
+Waits follow `wait-until`: a deadline, a fixed interval (30 seconds), and a distinct result when the
+read cannot be made. `LOOP_LAND_INTERVAL` (seconds) and `LOOP_LAND_MINUTE_SECONDS` (what a minute of
+`--timeout` and `ci-max-minutes` is worth) let a test run fast; they have no other use.
+"""
+import argparse
+import datetime
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+from loop_checks import (STANDING_VALUE, GhError, ci_required_names, key_block, loopmd_commands,
+                         main_required_state, origin_slug, required_check_states, required_checks, run,
+                         split_globs, standing_commands)
+
+LEDGER = 'landings.jsonl'
+MAIN_REF = 'refs/remotes/origin/main'
+SLOT_FILE = 'loop-land.slot.json'
+SLOT_STALE_SECONDS = 30 * 60
+DEFAULT_TIMEOUT_MINUTES = 60
+DEFAULT_CI_MAX_MINUTES = 30
+SHA = re.compile(r'^[0-9a-f]{7,40}$')
+LEDGER_KEYS = ('v', 'ts', 'event', 'outcome', 'pr', 'head', 'issues', 'merge_sha', 'main', 'deploy',
+               'fix_forward', 'slot_seconds', 'missing')
+
+READY_CODES = {'go': 0, 'held': 20, 'stale-head': 21, 'checks-failed': 22, 'main-undecided': 23,
+               'slot-busy': 24}
+VERIFY_CODES = {'landed': 0, 'main-red': 10, 'unread': 11, 'deploy-failed': 12, 'not-merged': 20,
+                'wrong-head': 21}
+ERROR_CODE = 30
+
+# The Standing file whose `## Commands` were read, named in every JSON line.
+STANDING = {'read': None}
+
+# Printed for the root to run; the tool itself never runs it.
+MERGE_ADVICE = 'gh pr merge {pr} --squash --match-head-commit {head}'
+
+
+class Cannot(Exception):
+    """A read the tool could not make or could not decide: outcome `error`, exit 30."""
+
+
+# Worktrees made for `ci-status` and `deploy-verify`, removed by cleanup().
+TREES = []
+
+
+def cleanup():
+    """Remove every worktree this invocation made, also after an error or a signal."""
+    while TREES:
+        repo, scratch = TREES.pop()
+        try:
+            if (scratch / 'main').exists():
+                run(['git', '-C', str(repo), 'worktree', 'remove', '--force', str(scratch / 'main')])
+        except GhError:
+            pass
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def interval():
+    return float(os.environ.get('LOOP_LAND_INTERVAL') or 30)
+
+
+def minutes(count):
+    return float(count) * float(os.environ.get('LOOP_LAND_MINUTE_SECONDS') or 60)
+
+
+def now_utc():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def stamp(moment=None):
+    return (moment or now_utc()).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def parse_stamp(text):
+    try:
+        return datetime.datetime.strptime(text, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
+    except (TypeError, ValueError):
+        raise Cannot(f'unreadable time {text!r}')
+
+
+def wait_until(probe, seconds):
+    """Call probe() every interval until it returns something other than None, or `seconds` pass.
+    Returns None at the deadline. A Cannot raised by the probe ends the wait at once, as exit 2 does
+    for wait-until, so an unreadable answer is never mistaken for "not yet"."""
+    deadline = time.monotonic() + seconds
+    while True:
+        value = probe()
+        if value is not None:
+            return value
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None
+        time.sleep(min(interval(), left))
+
+
+# --- git and gh ------------------------------------------------------------------------------
+
+def git(repo, *args, check=True, text=True):
+    try:
+        result = run(['git', '-C', str(repo), *args], text=text)
+    except GhError as error:
+        raise Cannot(str(error))
+    if check and result.returncode != 0:
+        detail = os.fsdecode(result.stderr or result.stdout).strip()[:200]
+        raise Cannot(f'git {args[0]} failed: {detail}')
+    return result
+
+
+def gh(repo, *args):
+    try:
+        result = run(['gh', *args], cwd=str(repo))
+    except GhError as error:
+        raise Cannot(str(error))
+    if result.returncode != 0:
+        raise Cannot(f'gh {args[0]} failed: {(result.stderr or result.stdout).strip()[:200]}')
+    return result.stdout
+
+
+def gh_json(repo, *args):
+    out = gh(repo, *args)
+    try:
+        return json.loads(out)
+    except ValueError:
+        raise Cannot(f'gh {args[0]} returned invalid JSON')
+
+
+def fetch_main(repo):
+    """The commit at the tip of origin's main, freshly fetched into refs/remotes/origin/main."""
+    git(repo, 'fetch', '-q', 'origin', f'+refs/heads/main:{MAIN_REF}')
+    return git(repo, 'rev-parse', '--verify', f'{MAIN_REF}^{{commit}}').stdout.strip()
+
+
+def file_at(repo, sha, path):
+    result = git(repo, 'show', f'{sha}:{path}', check=False)
+    return result.stdout if result.returncode == 0 else None
+
+
+def is_ancestor(repo, sha, tip):
+    result = git(repo, 'merge-base', '--is-ancestor', sha, tip, check=False)
+    if result.returncode not in (0, 1):
+        raise Cannot(f'git merge-base failed: {(result.stderr or result.stdout).strip()[:200]}')
+    return result.returncode == 0
+
+
+def changed_files(repo, sha):
+    # Treat renames as a deletion and an addition. Either endpoint can deploy.
+    result = git(repo, 'diff', '--name-only', '--no-renames', '-z', f'{sha}^1', sha, '--', text=False)
+    return [os.fsdecode(path) for path in result.stdout.split(b'\0') if path]
+
+
+def slug_of(repo):
+    try:
+        return origin_slug(repo)
+    except GhError as error:
+        raise Cannot(str(error))
+
+
+def pr_info(repo, slug, pr):
+    info = gh_json(repo, 'pr', 'view', str(pr), '-R', slug, '--json', 'state,headRefOid,mergeCommit')
+    if not isinstance(info, dict):
+        raise Cannot(f'pull request {pr} returned an unexpected shape')
+    commit = info.get('mergeCommit') or {}
+    return {'state': info.get('state'), 'head': info.get('headRefOid'), 'merge_sha': commit.get('oid')}
+
+
+# --- command keys ----------------------------------------------------------------------------
+# Read by bin/loop_checks.py, the one reader the lint shares.
+
+def standing_path(run_dir):
+    """The Standing file the run's charter cites, with its recorded sha256, or None. The charter is
+    `charter-*-loop<N>.md` in the run directory's parent (the repository's `codex/`) or in the run
+    directory, for a run directory named `loop<N>`."""
+    run_dir = Path(run_dir).resolve()
+    match = re.fullmatch(r'loop(\d+)', run_dir.name)
+    if not match:
+        return None
+    pattern = f'charter-*-loop{match.group(1)}.md'
+    found = sorted(run_dir.parent.glob(pattern), key=lambda f: f.name) + \
+        sorted(run_dir.glob(pattern), key=lambda f: f.name)
+    if not found:
+        return None
+    head = []
+    # Several charters may match; the newest by name is the one that counts.
+    for line in max(found, key=lambda f: f.name).read_text(encoding='utf-8').splitlines():
+        if line.startswith('## '):
+            break
+        head.append(line)
+    cited = STANDING_VALUE.match(key_block(head).get('standing', ''))
+    return (cited.group(1), cited.group(2)) if cited else None
+
+
+def load_commands(repo, run_dir, tip):
+    """The command keys: main's LOOP.md, then the Standing file's `## Commands` over it."""
+    text = file_at(repo, tip, 'LOOP.md')
+    keys = loopmd_commands(text) if text is not None else {}
+    cited = standing_path(run_dir)
+    if cited:
+        path, digest = cited
+        try:
+            data = Path(path).read_bytes()
+        except OSError as error:
+            raise Cannot(f'the Standing file cannot be read: {error.strerror or error}')
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise Cannot('the Standing file no longer matches the sha256 its charter cites')
+        STANDING['read'] = path
+        keys.update(standing_commands(data.decode('utf-8', 'replace')))
+    return keys
+
+
+def glob_regex(glob):
+    out, i = [], 0
+    while i < len(glob):
+        c = glob[i]
+        if glob.startswith('**/', i):
+            out.append('(?:.*/)?')
+            i += 3
+            continue
+        if glob.startswith('**', i):
+            out.append('.*')
+            i += 2
+            continue
+        if c == '*':
+            out.append('[^/]*')
+        elif c == '?':
+            out.append('[^/]')
+        elif c == '{':
+            end = glob.find('}', i)
+            if end == -1:
+                out.append(re.escape(c))
+            else:
+                out.append('(?:' + '|'.join(glob_regex(p) for p in glob[i + 1:end].split(',')) + ')')
+                i = end
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return ''.join(out)
+
+
+def touches(paths, globs):
+    patterns = [re.compile(glob_regex(g) + r'\Z', re.DOTALL) for g in globs]
+    return any(p.match(path) for path in paths for p in patterns)
+
+
+# --- the ledger and the slot -----------------------------------------------------------------
+
+def parse_issues(value):
+    issues = []
+    for item in value.split(','):
+        item = item.strip().lstrip('#')
+        if item:
+            issues.append(int(item) if item.isdigit() else item)
+    return issues
+
+
+def append_event(run_dir, event, outcome, pr=None, head=None, issues=None, **fields):
+    record = {key: None for key in LEDGER_KEYS}
+    record.update({'v': 1, 'ts': stamp(), 'event': event, 'outcome': outcome, 'pr': pr, 'head': head,
+                   'issues': list(issues or [])})
+    record.update(fields)
+    line = json.dumps(record, sort_keys=False) + '\n'
+    try:
+        with open(Path(run_dir) / LEDGER, 'a', encoding='utf-8') as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as error:
+        raise Cannot(f'the ledger cannot be written: {error.strerror or error}')
+    return record
+
+
+def read_ledger(run_dir):
+    path = Path(run_dir) / LEDGER
+    if not path.exists():
+        return []
+    events = []
+    for number, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            raise Cannot(f'{path}:{number} is not JSON')
+        if not isinstance(record, dict) or record.get('v') != 1:
+            raise Cannot(f'{path}:{number} is not a version 1 event')
+        events.append(record)
+    return events
+
+
+def landing_key(record):
+    return record.get('pr') if record.get('pr') is not None else record.get('head')
+
+
+def last_event(events, pr=None, head=None, kinds=None):
+    """A landing's last event. An `error` event is not state: it means the tool could not tell, as the
+    Stop hook and loop-pi read it, so it is never the answer."""
+    for record in reversed(events):
+        if record.get('event') == 'error':
+            continue
+        if pr is not None and record.get('pr') != pr:
+            continue
+        if pr is None and head is not None and (record.get('pr') is not None or record.get('head') != head):
+            continue
+        if kinds and record.get('event') not in kinds:
+            continue
+        return record
+    return None
+
+
+def slot_path(repo):
+    out = git(repo, 'rev-parse', '--git-common-dir').stdout.strip()
+    common = Path(out)
+    if not common.is_absolute():
+        common = Path(repo) / common
+    return common.resolve() / SLOT_FILE
+
+
+def read_slot(path):
+    try:
+        raw = path.read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise Cannot(f'the landing slot cannot be read: {error.strerror or error}')
+    try:
+        slot = json.loads(raw)
+    except ValueError:
+        raise Cannot(f'the landing slot {path} is not JSON; inspect it and abandon the landing')
+    if not isinstance(slot, dict) or 'taken' not in slot:
+        raise Cannot(f'the landing slot {path} has an unexpected shape')
+    return slot
+
+
+def same_landing(slot, run_dir, pr, head):
+    if slot.get('run_dir') != str(Path(run_dir).resolve()):
+        return False
+    return slot.get('pr') == pr if pr is not None else (slot.get('pr') is None and slot.get('head') == head)
+
+
+def take_slot(path, run_dir, pr, head, issues):
+    """Take the slot, written to a temporary file and moved into place so it is never half-written.
+    Returns False when another landing took it in the meantime."""
+    record = {'v': 1, 'run_dir': str(Path(run_dir).resolve()), 'pr': pr, 'head': head, 'issues': issues,
+              'taken': stamp()}
+    tmp = path.with_name(f'{SLOT_FILE}.{os.getpid()}.tmp')
+    try:
+        tmp.write_text(json.dumps(record) + '\n', encoding='utf-8')
+        try:
+            os.link(tmp, path)  # fails when a slot exists: the exclusive form of a rename
+        except FileExistsError:
+            return False
+    except OSError as error:
+        raise Cannot(f'the landing slot cannot be written: {error.strerror or error}')
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return True
+
+
+def names_landing(slot, pr, head):
+    return slot.get('pr') == pr and slot.get('head') == head if pr is None else slot.get('pr') == pr
+
+
+def release_slot(path, pr, head):
+    """Free the slot only when, read again now, it still names this landing: it may have been
+    abandoned and taken by another landing since the caller last looked. Returns whether it freed."""
+    current = read_slot(path)
+    if current is None or not names_landing(current, pr, head):
+        return False
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise Cannot(f'the landing slot cannot be removed: {error.strerror or error}')
+    return True
+
+
+def slot_seconds(slot):
+    if not slot:
+        return None
+    return max(0, int((now_utc() - parse_stamp(slot['taken'])).total_seconds()))
+
+
+# --- reading CI ------------------------------------------------------------------------------
+
+class Repo:
+    """One repository and the answers read for one command."""
+
+    def __init__(self, repo, run_dir):
+        self.repo = Path(repo)
+        self.run_dir = Path(run_dir)
+        self.slug = slug_of(self.repo)
+        self.slot = slot_path(self.repo)
+        self.tip = fetch_main(self.repo)
+        self.keys_tip = self.tip
+        self.keys = load_commands(self.repo, self.run_dir, self.keys_tip)
+        self._required = None
+        self._tree = None
+
+    def worktree(self):
+        """A detached worktree at the commit the keys were read from, made once per invocation and
+        removed on exit (see cleanup). `ci-status` and `deploy-verify` run here, never in the caller's
+        checkout, which may have a pull request branch checked out."""
+        if self._tree is None:
+            scratch = Path(tempfile.mkdtemp(prefix='loop-land-'))
+            TREES.append((self.repo, scratch))
+            tree = scratch / 'main'
+            git(self.repo, 'worktree', 'add', '--detach', '--quiet', str(tree), self.keys_tip)
+            self._tree = tree
+        return self._tree
+
+    def required(self):
+        if self._required is None:
+            if 'ci-required' in self.keys:
+                self._required = ci_required_names(self.keys['ci-required'])
+            else:
+                try:
+                    self._required = required_checks(self.repo)
+                except GhError as error:
+                    raise Cannot(str(error))
+        return self._required
+
+    def ci_max_minutes(self):
+        value = self.keys.get('ci-max-minutes', '')
+        return int(value) if re.fullmatch(r'[1-9][0-9]*', value) else DEFAULT_CI_MAX_MINUTES
+
+    def command(self, key, sha):
+        """Run a `ci-status` or `deploy-verify` command; its exit code, or None when it timed out."""
+        if not SHA.match(sha):
+            raise Cannot(f'{sha!r} is not a commit sha')
+        command = self.keys[key].replace('{sha}', sha)
+        try:
+            return subprocess.run(command, shell=True, cwd=str(self.worktree()), capture_output=True, text=True,
+                                  timeout=120).returncode
+        except subprocess.TimeoutExpired:
+            return None
+        except OSError as error:
+            raise Cannot(f'{key} could not run: {error.strerror or error}')
+
+    def ci(self, sha):
+        """{'state': green|red|undecided, 'red': [names], 'cancelled': {name: id}, 'detail': text}."""
+        if 'ci-status' in self.keys:
+            code = self.command('ci-status', sha)
+            if code == 2:
+                raise Cannot('ci-status cannot tell')
+            state = {0: 'green', 1: 'red'}.get(code, 'undecided')
+            return {'state': state, 'red': ['ci-status'] if state == 'red' else [], 'cancelled': {},
+                    'detail': f'ci-status exited {code}'}
+        required = self.required()
+        if not required:
+            return {'state': 'green', 'red': [], 'cancelled': {}, 'detail': 'no required checks'}
+        try:
+            states = required_check_states(self.repo, required, sha)
+        except GhError as error:
+            raise Cannot(str(error))
+        red = sorted(n for n, s in states.items() if s['state'] == 'red')
+        cancelled = {n: s['id'] for n, s in states.items() if s['state'] == 'cancelled'}
+        green = set(states) == required and all(s['state'] == 'green' for s in states.values())
+        return {'state': 'red' if red else 'green' if green else 'undecided', 'red': red,
+                'cancelled': cancelled,
+                'detail': ', '.join(red) if red else 'every required check succeeded' if green
+                else 'required checks pending'}
+
+    def main_state(self):
+        """('green'|'red'|'undecided', detail) for the tip of main, read afresh."""
+        if 'ci-status' in self.keys:
+            self.tip = fetch_main(self.repo)
+            read = self.ci(self.tip)
+            return read['state'], read['detail']
+        required = self.required()
+        if not required:
+            return 'green', 'no required checks'
+        self.tip = fetch_main(self.repo)
+        try:
+            return main_required_state(self.repo, required, self.tip)
+        except GhError as error:
+            raise Cannot(str(error))
+
+    def rerun(self, read, reran):
+        """Rerun each cancelled or superseded check once. Returns the names cancelled again."""
+        again = []
+        for name, job in sorted(read['cancelled'].items()):
+            if name not in reran:
+                gh(self.repo, 'api', '-X', 'POST', f'repos/{self.slug}/actions/jobs/{job}/rerun')
+                reran[name] = job
+            elif reran[name] != job:
+                again.append(name)
+        return again
+
+    def deploy_state(self, merge_sha):
+        """synced | failed | unread | n/a for one merge."""
+        if self.keys.get('deploy-on-push') != 'yes':
+            return 'n/a', 'the repository does not deploy on merge'
+        globs = split_globs(self.keys.get('deploy-paths', ''))
+        if globs and not touches(changed_files(self.repo, merge_sha), globs):
+            return 'n/a', 'the merge touched no deploy path'
+        verify = self.keys.get('deploy-verify')
+        if verify is None:
+            return 'unread', 'deploy-on-push is yes and no deploy-verify names the read'
+        if verify.lower() == 'none':
+            return 'n/a', 'deploy-verify is none'
+
+        def probe():
+            code = self.command('deploy-verify', merge_sha)
+            if code == 0:
+                return 'synced', 'deploy-verify exited 0'
+            if code == 1:
+                return 'failed', 'deploy-verify exited 1'
+            if code == 2:
+                return 'unread', 'deploy-verify cannot tell'
+            return None
+
+        found = wait_until(probe, minutes(self.ci_max_minutes()))
+        return found or ('unread', 'deploy-verify gave no answer by the deadline')
+
+
+# --- output ----------------------------------------------------------------------------------
+
+def emit(report):
+    """Print the one JSON line, naming the Standing file read or that none was."""
+    report['standing'] = STANDING['read']
+    print(json.dumps(report))
+
+
+def conclude(run_dir, event, outcome, code, detail, pr=None, head=None, issues=None, extra=None, **fields):
+    """Append the event, print the JSON line and return the exit code."""
+    append_event(run_dir, event, outcome, pr=pr, head=head, issues=issues, **fields)
+    report = {'outcome': outcome, 'exit': code, 'pr': pr, 'head': head, 'detail': detail}
+    report.update(extra or {})
+    emit(report)
+    return code
+
+
+def fail(run_dir, error, pr=None, head=None, issues=None):
+    """An `error` outcome: the event, and what was last known of the landing. A ledger that cannot be
+    parsed is left as it is: the `error` event is still appended after the bad line, `ledger` says what
+    is wrong, and every read that needs the ledger (summary, a verify with no slot) exits 30 until the
+    line is repaired by hand."""
+    known, ledger = None, None
+    try:
+        known = last_event(read_ledger(run_dir), pr=pr, head=head if pr is None else None)
+    except Cannot as problem:
+        ledger = str(problem)
+    try:
+        append_event(run_dir, 'error', 'error', pr=pr, head=head, issues=issues)
+    except Cannot:
+        pass
+    emit({'outcome': 'error', 'exit': ERROR_CODE, 'pr': pr, 'head': head, 'detail': str(error),
+          'last_known': known, 'ledger': ledger})
+    return ERROR_CODE
+
+
+# --- verify ----------------------------------------------------------------------------------
+
+def do_verify(repo, run_dir, pr, sha, slot, expected_head, issues):
+    """The reads after a merge, for a pull request (`pr`) or a pushed commit (`sha`). Appends the events
+    to `run_dir`'s ledger, frees the slot when the landing is closed, prints nothing. Returns
+    (outcome, code, detail, extras)."""
+    events = read_ledger(run_dir)
+    if pr is not None:
+        info = pr_info(repo.repo, repo.slug, pr)
+        if info['state'] != 'MERGED':
+            return finish_refused(run_dir, 'not-merged', 20, f'pull request {pr} is {info["state"]}, not merged',
+                                  pr, expected_head, issues)
+        if info['head'] != expected_head:
+            return finish_refused(run_dir, 'wrong-head', 21,
+                                  f'pull request {pr} merged with head {info["head"]}, the slot holds {expected_head}',
+                                  pr, expected_head, issues)
+        if not info['merge_sha']:
+            raise Cannot(f'pull request {pr} is merged but names no merge commit')
+        merge_sha = info['merge_sha']
+    else:
+        tip = fetch_main(repo.repo)
+        if not is_ancestor(repo.repo, sha, tip):
+            return finish_refused(run_dir, 'not-merged', 20, f'{sha} is not on main', None, sha, issues)
+        merge_sha = sha
+    if not any(e.get('event') == 'merged' and e.get('merge_sha') == merge_sha and landing_key(e) == (pr if pr is not None else sha)
+               for e in events):
+        append_event(run_dir, 'merged', None, pr=pr, head=expected_head, issues=issues, merge_sha=merge_sha)
+
+    reran = {}
+
+    def probe():
+        read = repo.ci(merge_sha)
+        if read['state'] != 'undecided':
+            return read
+        repo.rerun(read, reran)
+        return None
+
+    read = wait_until(probe, minutes(repo.ci_max_minutes()))
+    main = read['state'] if read else 'unread'
+    main_detail = read['detail'] if read else 'main was not read by the deadline'
+    if main == 'unread':
+        deploy, deploy_detail = 'unread', 'not read: main was not read'
+    else:
+        deploy, deploy_detail = repo.deploy_state(merge_sha)
+    held_for = slot_seconds(slot)
+    if main == 'red':
+        outcome = 'main-red'
+    elif main == 'unread' or deploy == 'unread':
+        outcome = 'unread'
+    elif deploy == 'failed':
+        outcome = 'deploy-failed'
+    else:
+        outcome = 'landed'
+    append_event(run_dir, 'verified', outcome, pr=pr, head=expected_head, issues=issues, merge_sha=merge_sha,
+                 main=main, deploy=deploy, slot_seconds=held_for)
+    if outcome != 'unread':
+        release_slot(repo.slot, pr, expected_head)
+    detail = f'main {main} ({main_detail}); deploy {deploy} ({deploy_detail})'
+    return outcome, VERIFY_CODES[outcome], detail, {'merge_sha': merge_sha, 'main': main, 'deploy': deploy}
+
+
+def finish_refused(run_dir, outcome, code, detail, pr, head, issues):
+    append_event(run_dir, 'refused', outcome, pr=pr, head=head, issues=issues)
+    return outcome, code, detail, {}
+
+
+def landing_context(repo, run_dir, pr, sha):
+    """(slot, expected head, issues) for a landing, from the slot or else the ledger's last `ready`."""
+    slot = read_slot(repo.slot)
+    if slot and (same_landing(slot, run_dir, pr, sha) or (pr is not None and slot.get('pr') == pr)):
+        return slot, slot.get('head'), slot.get('issues') or []
+    ready = last_event(read_ledger(run_dir), pr=pr, head=sha, kinds=('ready', 'merged'))
+    if ready is None:
+        raise Cannot(f'no landing is recorded for {"pull request " + str(pr) if pr is not None else sha}; run ready first')
+    return None, ready.get('head'), ready.get('issues') or []
+
+
+def cmd_verify(args):
+    pr = args.pr
+    head = args.sha
+    try:
+        repo = Repo(args.repo, args.run_dir)
+    except Cannot as error:
+        return fail(args.run_dir, error, pr, head)
+    try:
+        slot, expected, issues = landing_context(repo, args.run_dir, pr, head)
+        outcome, code, detail, extra = do_verify(repo, args.run_dir, pr, head, slot, expected, issues)
+    except Cannot as error:
+        return fail(args.run_dir, error, pr, head)
+    emit({'outcome': outcome, 'exit': code, 'pr': pr, 'head': expected, 'detail': detail, **extra})
+    return code
+
+
+# --- ready -----------------------------------------------------------------------------------
+
+def cmd_ready(args):
+    pr, head = args.pr, args.head or args.sha
+    issues = parse_issues(args.issues)
+    try:
+        repo = Repo(args.repo, args.run_dir)
+        return ready(repo, args, pr, head, issues)
+    except Cannot as error:
+        return fail(args.run_dir, error, pr, head, issues)
+
+
+def refuse(args, outcome, detail, pr, head, issues, **extra):
+    return conclude(args.run_dir, 'refused', outcome, READY_CODES[outcome], detail, pr=pr, head=head,
+                    issues=issues, fix_forward=args.fix_forward, extra=extra or None)
+
+
+def resolve_slot(repo, args):
+    """Step 2: a held slot is resolved before anything else, with no exception for the landing that
+    asks: merged, do verify's reads; unmerged and older than 30 minutes, record `abandoned` and free it;
+    otherwise it is busy. Returns the reason a landing still holds the slot, or None to go on. Go is only
+    ever printed after `take_slot` has taken the slot in the same invocation."""
+    slot = read_slot(repo.slot)
+    if slot is None:
+        return None
+    held_pr, held_head = slot.get('pr'), slot.get('head')
+    held_dir = slot.get('run_dir') if slot.get('run_dir') and Path(slot['run_dir']).is_dir() else args.run_dir
+    if held_pr is not None:
+        merged = pr_info(repo.repo, repo.slug, held_pr)['state'] == 'MERGED'
+    else:
+        merged = is_ancestor(repo.repo, held_head, fetch_main(repo.repo))
+    if merged:
+        outcome, code, detail, _ = do_verify(repo, held_dir, held_pr, held_head if held_pr is None else None, slot,
+                                             held_head, slot.get('issues') or [])
+        again = read_slot(repo.slot)
+        if again is None or not names_landing(again, held_pr, held_head):
+            return None
+        return f'the landing in flight ({_describe(slot)}) merged and its reads gave {outcome}: {detail}'
+    age = slot_seconds(slot)
+    if age > SLOT_STALE_SECONDS:
+        if release_slot(repo.slot, held_pr, held_head):
+            append_event(held_dir, 'abandoned', 'abandoned', pr=held_pr, head=held_head,
+                         issues=slot.get('issues'), slot_seconds=age)
+        return None
+    return f'{_describe(slot)} holds the landing slot, taken {age} seconds ago'
+
+
+def _describe(slot):
+    return f'pull request {slot["pr"]}' if slot.get('pr') is not None else f'commit {slot.get("head")}'
+
+
+def ready(repo, args, pr, head, issues):
+    busy = resolve_slot(repo, args)
+    if busy:
+        return refuse(args, 'slot-busy', busy, pr, head, issues)
+    seconds = minutes(args.timeout)
+    started = time.monotonic()
+
+    if pr is not None:
+        info = pr_info(repo.repo, repo.slug, pr)
+        if info['state'] != 'OPEN':
+            raise Cannot(f'pull request {pr} is {info["state"]}, not open')
+        if info['head'] != head:
+            return refuse(args, 'stale-head', f'pull request {pr} is at {info["head"]}, not {head}', pr, head,
+                          issues)
+        reran = {}
+
+        def checks():
+            read = repo.ci(head)
+            if read['red']:
+                return read
+            again = repo.rerun(read, reran)
+            if again:
+                read['red'] = again
+                read['detail'] = 'cancelled again after one rerun: ' + ', '.join(again)
+                return read
+            return read if read['state'] == 'green' else None
+
+        read = wait_until(checks, seconds)
+        if read is None:
+            raise Cannot('the required checks were still pending at the deadline')
+        if read['red']:
+            names = ', '.join(read['red'])
+            return refuse(args, 'checks-failed', f'{names}: {read["detail"]}', pr, head, issues, checks=read['red'])
+
+    def main_probe():
+        state, detail = repo.main_state()
+        return None if state == 'undecided' else (state, detail)
+
+    left = max(0.0, seconds - (time.monotonic() - started))
+    main = wait_until(main_probe, left)
+    if main is None:
+        return refuse(args, 'main-undecided', 'the required checks on main did not report by the deadline', pr,
+                      head, issues)
+    state, detail = main
+    if state == 'red' and not args.fix_forward:
+        return refuse(args, 'held', f'main is red: {detail}', pr, head, issues)
+
+    if pr is not None:
+        # The head may have moved while the checks were read: confirm it once more before the slot is taken.
+        info = pr_info(repo.repo, repo.slug, pr)
+        if info['state'] != 'OPEN':
+            if info['state'] == 'MERGED':
+                raise Cannot(f'pull request {pr} became MERGED while ready was waiting; no landing was recorded '
+                             'for it, so verify cannot read it and `summary --check` will list it as missing')
+            raise Cannot(f'pull request {pr} became {info["state"]} while ready was waiting; '
+                         'run abandon or reopen it')
+        if info['head'] != head:
+            return refuse(args, 'stale-head', f'pull request {pr} is at {info["head"]}, not {head}', pr, head,
+                          issues)
+    if not take_slot(repo.slot, args.run_dir, pr, head, issues):
+        return refuse(args, 'slot-busy', 'another landing took the slot first', pr, head, issues)
+    extra = {'main': state, 'slot': str(repo.slot)}
+    if pr is not None:
+        extra['merge_command'] = MERGE_ADVICE.format(pr=pr, head=head)
+    return conclude(args.run_dir, 'ready', 'go', 0, f'main {state}: {detail}', pr=pr, head=head, issues=issues,
+                    fix_forward=args.fix_forward, extra=extra)
+
+
+# --- abandon and summary ---------------------------------------------------------------------
+
+def cmd_abandon(args):
+    pr, head = args.pr, args.sha
+    try:
+        if pr is not None and pr_info(args.repo, slug_of(args.repo), pr)['state'] == 'MERGED':
+            raise Cannot(f'pull request {pr} is already merged; run verify, never abandon')
+        path = slot_path(args.repo)
+        slot = read_slot(path)
+        known = last_event(read_ledger(args.run_dir), pr=pr, head=head)
+        # What the slot says counts only if it is released: it may have changed since it was read.
+        mine = bool(slot) and names_landing(slot, pr, head) and release_slot(path, pr, head)
+        source = slot if mine else known or {}
+        held_for = slot_seconds(slot) if mine else None
+        return conclude(args.run_dir, 'abandoned', 'abandoned', 0, args.reason, pr=pr,
+                        head=source.get('head') if pr is not None else head, issues=source.get('issues'),
+                        slot_seconds=held_for, reason=args.reason.strip(), extra={'slot_freed': bool(mine)})
+    except Cannot as error:
+        return fail(args.run_dir, error, pr, head)
+
+
+def summarise(events):
+    landings = {}
+    for record in events:
+        if record['event'] in ('closeout-check', 'error'):
+            continue
+        landings[landing_key(record)] = record
+    return landings
+
+
+def merged_from_landing_branches(repo, run_dir):
+    match = re.fullmatch(r'loop(\d+)', Path(run_dir).resolve().name)
+    if not match:
+        raise Cannot(f'the run directory {run_dir} is not named loop<N>, so its landing branches are unknown')
+    branch = re.compile(rf'loop{match.group(1)}-land\d+')
+    prs = gh_json(repo, 'pr', 'list', '-R', slug_of(repo), '--state', 'merged', '--limit', '500', '--json',
+                  'number,headRefName,mergeCommit')
+    return sorted(p['number'] for p in prs if branch.fullmatch(p.get('headRefName') or ''))
+
+
+def cmd_summary(args):
+    try:
+        events = read_ledger(args.run_dir)
+    except Cannot as error:
+        emit({'outcome': 'error', 'exit': ERROR_CODE, 'detail': str(error)})
+        return ERROR_CODE
+    rows = [('LANDING', 'EVENT', 'OUTCOME', 'HEAD', 'ISSUES', 'MAIN', 'DEPLOY', 'SLOT_SECONDS', 'FIX_FORWARD')]
+    for key, record in summarise(events).items():
+        label = f'#{record["pr"]}' if record.get('pr') is not None else 'direct'
+        rows.append((label, record['event'], record.get('outcome') or '-', (record.get('head') or '-')[:12],
+                     ','.join(str(i) for i in record.get('issues') or []) or '-', record.get('main') or '-',
+                     record.get('deploy') or '-', str(record['slot_seconds']) if record.get('slot_seconds') is not None else '-',
+                     record.get('fix_forward') or '-'))
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+    for row in rows:
+        print('  '.join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
+    if not args.check:
+        return 0
+    try:
+        github = merged_from_landing_branches(Path(args.repo), args.run_dir)
+        merged = {e['pr'] for e in events if e['event'] in ('merged', 'verified') and e.get('pr') is not None}
+        missing = [n for n in github if n not in merged]
+        append_event(args.run_dir, 'closeout-check', 'missing' if missing else 'ok',
+                     missing=missing or None)
+    except Cannot as error:
+        return fail(args.run_dir, error)
+    if missing:
+        print('closeout-check: missing ' + ', '.join(f'#{n}' for n in missing))
+        return 1
+    print('closeout-check: ok')
+    return 0
+
+
+# --- command line ----------------------------------------------------------------------------
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog='loop-land', description=__doc__.split('\n')[0])
+    sub = parser.add_subparsers(dest='command', required=True)
+
+    def common(p):
+        p.add_argument('--repo', required=True)
+        p.add_argument('--run-dir', required=True)
+
+    p = sub.add_parser('ready')
+    common(p)
+    p.add_argument('--pr', type=int)
+    p.add_argument('--head')
+    p.add_argument('--sha')
+    p.add_argument('--issues', required=True)
+    p.add_argument('--fix-forward', dest='fix_forward')
+    p.add_argument('--timeout', type=float, default=DEFAULT_TIMEOUT_MINUTES)
+    p = sub.add_parser('verify')
+    common(p)
+    p.add_argument('--pr', type=int)
+    p.add_argument('--sha')
+    p = sub.add_parser('abandon')
+    common(p)
+    p.add_argument('--pr', type=int)
+    p.add_argument('--sha')
+    p.add_argument('--reason', required=True)
+    p = sub.add_parser('summary')
+    common(p)
+    p.add_argument('--check', action='store_true')
+    return parser
+
+
+def usage(parser, args):
+    if not Path(args.run_dir).is_dir():
+        parser.error(f'--run-dir {args.run_dir} is not a directory')
+    if not Path(args.repo).is_dir():
+        parser.error(f'--repo {args.repo} is not a directory')
+    if args.command == 'summary':
+        return
+    if args.command == 'ready':
+        if (args.pr is None) == (args.sha is None):
+            parser.error('ready takes --pr and --head, or --sha for direct mode')
+        if args.pr is not None and not args.head:
+            parser.error('ready --pr needs --head')
+        if args.pr is None and args.head:
+            parser.error('--head goes with --pr')
+        if not parse_issues(args.issues):
+            parser.error('--issues names no issue')
+        if args.fix_forward is not None and not args.fix_forward.strip():
+            parser.error('--fix-forward needs a reason')
+        if args.timeout <= 0:
+            parser.error('--timeout must be positive')
+        for value in (args.head, args.sha):
+            if value and not SHA.match(value):
+                parser.error(f'{value!r} is not a commit sha')
+    elif (args.pr is None) == (args.sha is None):
+        parser.error(f'{args.command} takes --pr, or --sha for direct mode')
+    if args.command == 'abandon' and not args.reason.strip():
+        parser.error('--reason needs text')
+    if args.sha and not SHA.match(args.sha):
+        parser.error(f'{args.sha!r} is not a commit sha')
+
+
+class Interrupted(BaseException):
+    """A signal arrived: unwind to `main`, which reports an `error`, then `cleanup` removes the worktree."""
+
+
+# Only the first signal unwinds the command, and none once it is over. The handler reads these when it
+# runs, not when the signal arrives, so no signal can raise outside the `try` in `main` and none can
+# interrupt the cleanup.
+SIGNALS = {'raised': False, 'over': False}
+
+
+def on_signal(number, frame):
+    if SIGNALS['raised'] or SIGNALS['over']:
+        return
+    SIGNALS['raised'] = True
+    raise Interrupted(signal.Signals(number).name)
+
+
+def finished():
+    """The command is over: from here a signal is ignored, so the cleanup runs to the end and the exit
+    code is the command's own."""
+    SIGNALS['over'] = True
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    usage(parser, args)
+    handler = {'ready': cmd_ready, 'verify': cmd_verify, 'abandon': cmd_abandon, 'summary': cmd_summary}
+    for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(number, on_signal)
+    code = ERROR_CODE
+    try:
+        try:
+            code = handler[args.command](args)
+        except Interrupted as received:
+            code = fail(args.run_dir, f'interrupted by {received}', getattr(args, 'pr', None),
+                        getattr(args, 'head', None) or getattr(args, 'sha', None))
+        except Exception as error:  # 1 is reserved for `summary --check`: nothing else may exit 1
+            code = fail(args.run_dir, f'unexpected {type(error).__name__}: {error}', getattr(args, 'pr', None),
+                        getattr(args, 'head', None) or getattr(args, 'sha', None))
+        finished()
+    except Interrupted:
+        pass  # the one signal landed after the command, before `finished` took effect: only cleanup is left
+    cleanup()
+    return code
+
+
+if __name__ == '__main__':
+    sys.exit(main())
