@@ -222,17 +222,20 @@ def _program(tokens):
     while index < len(tokens):
         token = tokens[index]
         name = os.path.basename(token)
-        if ASSIGNMENT.fullmatch(token) or token in SKIP_WORDS:
+        if ASSIGNMENT.fullmatch(token) or token in SKIP_WORDS or token == "--":
+            # A bare `--` ends a wrapper's options (`command -- gh ...`); the program is the word after it.
             index += 1
         elif name in WRAPPERS:
             index += 1
             takes = WRAPPERS[name]
             if name == "timeout":
-                while index < len(tokens) and tokens[index].startswith("-"):
+                while index < len(tokens) and tokens[index] != "--" and tokens[index].startswith("-"):
                     index += 2 if tokens[index] in takes else 1
+                if index < len(tokens) and tokens[index] == "--":
+                    index += 1
                 index += 1
                 continue
-            while index < len(tokens) and (tokens[index].startswith("-") or ASSIGNMENT.fullmatch(tokens[index])):
+            while index < len(tokens) and tokens[index] != "--" and (tokens[index].startswith("-") or ASSIGNMENT.fullmatch(tokens[index])):
                 index += 2 if tokens[index] in takes else 1
         else:
             return name, tokens[index + 1:]

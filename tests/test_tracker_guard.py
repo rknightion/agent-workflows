@@ -172,6 +172,15 @@ class CheckTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertTrue(guard.check(command), f"allowed: {command!r}")
 
+    def test_an_end_of_options_marker_does_not_hide_the_program(self):
+        for command in ("command -- gh issue close 5", "exec -- gh issue close 5", "timeout -- 30 gh issue close 5",
+                        "nice -n 5 -- gh issue close 5", "env -- gh issue close 5", "sudo -u me -- gh issue close 5"):
+            with self.subTest(command=command):
+                self.assertTrue(guard.check(command), f"allowed: {command!r}")
+        for command in ("command -- gh issue view 5", "exec -- git status", "echo -- gh issue close 5"):
+            with self.subTest(command=command):
+                self.assertEqual(guard.check(command), [], f"blocked: {command!r}")
+
     def test_reads_and_look_alikes_are_allowed(self):
         for command in ALLOWED:
             with self.subTest(command=command):
