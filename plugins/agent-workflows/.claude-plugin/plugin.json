@@ -1,7 +1,7 @@
 {
   "name": "agent-workflows",
-  "version": "3.2.1",
-  "description": "Loop v4 for Claude Code: the loop preparation skill, six pinned lane agents, the Stop, brief-header and lane-return hooks, loop-lint, loop-land, loop-teardown, wait-until and the protocol documents.",
+  "version": "3.3.1",
+  "description": "Loop v4 for Claude Code: the loop preparation skill, six pinned lane agents, the Stop, brief-header and lane-return hooks, loop-lint, loop-land, loop-teardown, wait-until, the tracker and dsreview tools and the protocol documents.",
   "author": {
     "name": "Rob Knight",
     "url": "https://rob-knight.com"

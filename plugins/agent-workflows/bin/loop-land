@@ -4,6 +4,7 @@
     loop-land ready   --repo P --run-dir D --pr N --head SHA --issues N,... [--fix-forward REASON] [--timeout MIN]
     loop-land verify  --repo P --run-dir D --pr N
     loop-land abandon --repo P --run-dir D --pr N --reason TEXT
+    loop-land adopt   --repo P --run-dir D --pr N --merged-head SHA [--issues N,...] --reason TEXT   (owner only)
     loop-land summary --repo P --run-dir D [--check]
 
 `ready` decides whether a pull request may merge now and, on `go`, takes the repository's landing slot
@@ -16,13 +17,42 @@ Each command prints one line of JSON (`outcome`, `exit`, `detail`, ...) and exit
 Every outcome also appends one event to `<run-dir>/landings.jsonl`; a landing's state is its last event,
 not counting an `error` event, which means the tool could not tell. `abandon --reason` is also written to
 its `abandoned` event as an optional `reason` key, after the fixed keys; the automatic abandon of a stale
-slot writes none, and every reader of the ledger ignores a key it does not know.
+slot writes none, and every reader of the ledger ignores a key it does not know. `adopt --reason` is
+written the same way, on the `merged` event it appends.
 
     ready    0 go   20 held (main red)   21 stale-head   22 checks-failed   23 main-undecided   24 slot-busy
     verify   0 landed   10 main-red   11 unread   12 deploy-failed   20 not-merged   21 wrong-head
     any      30 error: the tool could not tell (a failing gh, an unreadable file); rerun the same command
     abandon  30 also when the pull request is already merged: run verify instead
+    adopt    0 adopted   40 not-adoptable (a condition below failed)   41 already-recorded   usage errors 2
     summary  0; with --check, 1 when GitHub shows a merge from this run's landing branches the ledger lacks
+
+`adopt` is for the repository OWNER, after confirming by hand what merged. A loop root must never run it.
+It recovers the two states that stop a run on purpose and have no other way out:
+
+  A. A pull request became MERGED while `ready` was waiting. `ready` stopped with exit 30 and took no
+     slot, so no landing is recorded: `verify` finds none, `abandon` refuses a merged pull request, and
+     `summary --check` lists it as missing.
+  B. `verify` returned `wrong-head` (exit 21): the pull request merged with a head other than the slot's.
+     The slot is kept, so every later `ready` is `slot-busy`, and `abandon` refuses.
+
+The owner looks at what merged, then runs `adopt --pr N --merged-head SHA --reason TEXT` with the head
+they confirmed (`--issues` too when no slot or earlier event for the pull request names them, and it must
+not contradict one that does). It appends one `merged` event with that head and the pull request's merge
+commit, and frees the slot when the slot names this pull request. It then prints that `verify --pr N` is
+the next step: `adopt` does not run `verify` and writes no `verified` event. It never merges, pushes or
+writes to GitHub. It refuses, writing nothing (no event, no `error` event, the slot untouched), unless
+GitHub says the pull request is MERGED at exactly `--merged-head` with a merge commit that is on origin's
+main, the ledger holds no `merged` or `verified` event for it (41), and any slot names this pull request
+(40 otherwise). A read that cannot be made is an `error` like any other command's (30).
+
+Owner steps. State A: confirm the merge and its head with `gh pr view N --json headRefOid,mergeCommit`;
+`loop-land adopt ... --pr N --merged-head <that head> --issues 11,12 --reason "merged while ready waited"`;
+then `loop-land verify --pr N`; `summary --check` then reports ok. State B: confirm that the head that
+merged (named in the `wrong-head` detail) is the change the run meant to land; run the same `adopt` with
+that head and a reason; `verify --pr N` then reads main and the deploy against it, and the slot is free
+for the next `ready`. If the merged change is not what the run meant to land, do not adopt: fix forward
+by hand and say so in the closeout.
 
 Where the commands come from. The repository's command keys (`ci-required`, `ci-status`, `ci-max-minutes`,
 `deploy-on-push`, `deploy-paths`, `deploy-verify`) are read from `LOOP.md` at the tip of origin's main, and
@@ -78,6 +108,7 @@ READY_CODES = {'go': 0, 'held': 20, 'stale-head': 21, 'checks-failed': 22, 'main
                'slot-busy': 24}
 VERIFY_CODES = {'landed': 0, 'main-red': 10, 'unread': 11, 'deploy-failed': 12, 'not-merged': 20,
                 'wrong-head': 21}
+ADOPT_CODES = {'adopted': 0, 'not-adoptable': 40, 'already-recorded': 41}
 ERROR_CODE = 30
 
 # The Standing file whose `## Commands` were read, named in every JSON line.
@@ -619,7 +650,8 @@ def do_verify(repo, run_dir, pr, sha, slot, expected_head, issues):
                                   pr, expected_head, issues)
         if info['head'] != expected_head:
             return finish_refused(run_dir, 'wrong-head', 21,
-                                  f'pull request {pr} merged with head {info["head"]}, the slot holds {expected_head}',
+                                  f'pull request {pr} merged with head {info["head"]}, the slot holds {expected_head}; '
+                                  'the owner, after confirming what merged, runs `loop-land adopt`',
                                   pr, expected_head, issues)
         if not info['merge_sha']:
             raise Cannot(f'pull request {pr} is merged but names no merge commit')
@@ -802,7 +834,8 @@ def ready(repo, args, pr, head, issues):
         if info['state'] != 'OPEN':
             if info['state'] == 'MERGED':
                 raise Cannot(f'pull request {pr} became MERGED while ready was waiting; no landing was recorded '
-                             'for it, so verify cannot read it and `summary --check` will list it as missing')
+                             'for it, so verify cannot read it and `summary --check` will list it as missing; '
+                             'the owner, after confirming what merged, runs `loop-land adopt`')
             raise Cannot(f'pull request {pr} became {info["state"]} while ready was waiting; '
                          'run abandon or reopen it')
         if info['head'] != head:
@@ -834,6 +867,69 @@ def cmd_abandon(args):
         return conclude(args.run_dir, 'abandoned', 'abandoned', 0, args.reason, pr=pr,
                         head=source.get('head') if pr is not None else head, issues=source.get('issues'),
                         slot_seconds=held_for, reason=args.reason.strip(), extra={'slot_freed': bool(mine)})
+    except Cannot as error:
+        return fail(args.run_dir, error, pr, head)
+
+
+def adopt_refusal(args, outcome, detail):
+    """A refusal by `adopt`: one JSON line and the exit code, and nothing written."""
+    emit({'outcome': outcome, 'exit': ADOPT_CODES[outcome], 'pr': args.pr, 'head': args.merged_head,
+          'detail': detail})
+    return ADOPT_CODES[outcome]
+
+
+def cmd_adopt(args):
+    """Record a landing that stopped on purpose (state A or B in the docstring), for the owner. Every
+    refusal is decided before the first write; the ledger and the slot are then untouched."""
+    pr, head = args.pr, args.merged_head.lower()
+    try:
+        slug = slug_of(args.repo)
+        events = read_ledger(args.run_dir)
+        for record in events:
+            if record.get('pr') == pr and record.get('event') in ('merged', 'verified'):
+                return adopt_refusal(args, 'already-recorded',
+                                     f'pull request {pr} already has a {record["event"]} event in the ledger')
+        path = slot_path(args.repo)
+        slot = read_slot(path)
+        if slot is not None and slot.get('pr') != pr:
+            return adopt_refusal(args, 'not-adoptable', f'the landing slot names {_describe(slot)}, not pull '
+                                 f'request {pr}; it is not this landing\'s to free')
+        known = last_event(events, pr=pr)
+        supplied = (slot or {}).get('issues') or (known or {}).get('issues') or []
+        if args.issues is not None:
+            given = parse_issues(args.issues)
+            if supplied and {str(i) for i in given} != {str(i) for i in supplied}:
+                return adopt_refusal(args, 'not-adoptable', f'--issues {given} contradicts the recorded '
+                                     f'issues {supplied} for pull request {pr}')
+            supplied = given
+        if not supplied:
+            return adopt_refusal(args, 'not-adoptable', f'no slot or earlier event names the issues for pull '
+                                 f'request {pr}: pass --issues')
+        info = pr_info(args.repo, slug, pr)
+        if info['state'] != 'MERGED':
+            return adopt_refusal(args, 'not-adoptable', f'pull request {pr} is {info["state"]}, not merged')
+        if info['head'] != head:
+            return adopt_refusal(args, 'not-adoptable',
+                                 f'pull request {pr} merged with head {info["head"]}, not {head}')
+        if not info['merge_sha']:
+            return adopt_refusal(args, 'not-adoptable', f'pull request {pr} is merged but names no merge commit')
+        tip = fetch_main(args.repo)
+        if git(args.repo, 'cat-file', '-e', f'{info["merge_sha"]}^{{commit}}', check=False).returncode != 0 or \
+                not is_ancestor(args.repo, info['merge_sha'], tip):
+            return adopt_refusal(args, 'not-adoptable',
+                                 f'the merge commit {info["merge_sha"]} is not on origin\'s main')
+        # The slot goes first: an interruption then leaves a free slot and no merged event, which a second
+        # adopt repairs. The other order could leave the slot held beside a recorded merge, and the retry
+        # would be already-recorded with verify still reading the slot's old head.
+        freed = slot is not None and release_slot(path, pr, None)
+        record = append_event(args.run_dir, 'merged', None, pr=pr, head=head, issues=supplied,
+                              merge_sha=info['merge_sha'], reason=args.reason.strip())
+        emit({'outcome': 'adopted', 'exit': 0, 'pr': pr, 'head': head,
+              'detail': f'recorded one merged event for pull request {pr} at {info["merge_sha"]}; '
+                        f'run loop-land verify --pr {pr} next',
+              'merge_sha': info['merge_sha'], 'issues': record['issues'], 'slot_freed': freed,
+              'next': f'loop-land verify --pr {pr}'})
+        return 0
     except Cannot as error:
         return fail(args.run_dir, error, pr, head)
 
@@ -917,6 +1013,14 @@ def build_parser():
     p.add_argument('--pr', type=int)
     p.add_argument('--sha')
     p.add_argument('--reason', required=True)
+    p = sub.add_parser('adopt', description='Owner only, after confirming by hand what merged; a loop root '
+                       'must never run it. Records a pull request that merged while ready waited, or that '
+                       'verify stopped on as wrong-head, and frees its slot. Run verify next.')
+    common(p)
+    p.add_argument('--pr', type=int, required=True)
+    p.add_argument('--merged-head', dest='merged_head', required=True)
+    p.add_argument('--issues')
+    p.add_argument('--reason', required=True)
     p = sub.add_parser('summary')
     common(p)
     p.add_argument('--check', action='store_true')
@@ -929,6 +1033,14 @@ def usage(parser, args):
     if not Path(args.repo).is_dir():
         parser.error(f'--repo {args.repo} is not a directory')
     if args.command == 'summary':
+        return
+    if args.command == 'adopt':
+        if not SHA.match(args.merged_head.lower()):
+            parser.error(f'{args.merged_head!r} is not a commit sha')
+        if not args.reason.strip():
+            parser.error('--reason needs text')
+        if args.issues is not None and not parse_issues(args.issues):
+            parser.error('--issues names no issue')
         return
     if args.command == 'ready':
         if (args.pr is None) == (args.sha is None):
@@ -981,7 +1093,8 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     usage(parser, args)
-    handler = {'ready': cmd_ready, 'verify': cmd_verify, 'abandon': cmd_abandon, 'summary': cmd_summary}
+    handler = {'ready': cmd_ready, 'verify': cmd_verify, 'abandon': cmd_abandon, 'adopt': cmd_adopt,
+               'summary': cmd_summary}
     for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         signal.signal(number, on_signal)
     code = ERROR_CODE

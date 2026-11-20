@@ -22,11 +22,39 @@ The programs the documents tell the root and the lanes to run ship in this plugi
 Claude Code puts on the Bash tool's PATH while the plugin is enabled: `loop-lint`, `loop-land`,
 `loop-teardown` and `wait-until`. By absolute path they are in `<plugin root>/bin/`.
 
-`just tracker` (with `queue`, `close` and `handoff`) is the author's own tracker command and is not
-shipped. Where the documents name it, use your tracker's equivalent: the queue command your
-`LOOP.md` names under `## Queue`, `gh issue close` (or a `Closes #N` line in the landing pull
-request) to close an issue, and a label or comment of your choosing to hand an issue to the owner.
-On a Backlog.md board, the `backlog` CLI does all three.
+Where the documents say `just tracker <command>` (`queue`, `close`, `handoff` and the rest), they mean a
+`tracker` recipe in your repository's own `justfile` that runs the shipped tool,
+`<plugin root>/tools/tracker/tracker.py`. When a GitHub App writes the issues, run `with-token` (in the
+same directory) in its place: it takes the same arguments, mints the App's token and runs the tracker.
+The simplest setup uses your ambient `gh` login and no App:
+
+```just
+export TRACKER_ISSUE_IDENTITY := "user"
+export TRACKER_REPO := "OWNER/REPO"
+export TRACKER_PROJECT := "1"
+export TRACKER_PROJECT_OWNER := "OWNER"
+
+# Absolute path of this plugin's installed version, the directory that holds `protocol/`.
+plugin_root := "/absolute/path/to/agent-workflows"
+
+# The arguments reach the tool as given: free text is neither split on spaces nor read by the shell.
+# The loop's tracker command: queue, view, create, claim, status, handoff, tick, close.
+[positional-arguments]
+tracker *args:
+    @python3 {{plugin_root}}/tools/tracker/tracker.py "$@"
+```
+
+The tool needs Python 3.12 or later: name that interpreter in the recipe if `python3` is older.
+
+`TRACKER_PROJECT` is the number of a GitHub Project. `gh` needs the `project` scope for the Project
+writes. The Project needs a `Status` field with the options Ready, In progress, Done and Needs input, a
+`Lane` text field, and a `Priority` field. `<plugin root>/tools/tracker/README.md` lists every setting
+and describes the acceptance-evidence workflow that `close --pr` requires (point
+`TRACKER_EVIDENCE_WORKFLOW` at your own) and the optional guard that refuses raw `gh` writes to issues
+and Projects.
+
+A Backlog.md board does not use the tracker tool. There the `backlog` CLI lists, closes and hands
+over tasks, so use it wherever the documents name `just tracker`.
 
 ## Placeholders
 
