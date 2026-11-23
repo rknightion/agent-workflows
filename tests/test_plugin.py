@@ -1,9 +1,10 @@
-"""Checks on the published plugin: manifests, the loop skill's launch template, hooks and the bin/ programs.
+"""Checks on the published plugin: manifests, the loop skill, the lane agents and the bin/ programs.
+
+The hooks have their own tests beside this file (test_run_gate.py and test_lane_return.py).
 
 Every test works in a temporary directory; nothing touches a Claude Code home or ~/.local/state.
 """
 
-import datetime
 import hashlib
 import json
 import os
@@ -13,37 +14,17 @@ import sys
 import tempfile
 import textwrap
 import unittest
-from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLUGIN = os.path.join(ROOT, "plugins", "agent-workflows")
-sys.path.insert(0, os.path.join(PLUGIN, "scripts"))
-
-import brief_header  # noqa: E402
-import fanout_continue  # noqa: E402
-import fanout_session  # noqa: E402
-import loop_launch  # noqa: E402
 
 BIN = os.path.join(PLUGIN, "bin")
 LOOP_LINT = os.path.join(BIN, "loop-lint")
-PLUGIN_ROOT_VAR = "${CLAUDE_PLUGIN_ROOT}"
 
 
 def read(*parts):
     with open(os.path.join(*parts), encoding="utf-8") as fh:
         return fh.read()
-
-
-def launch_template():
-    skill = read(PLUGIN, "skills", "loop", "SKILL.md")
-    return re.search(r"```text\n(.*?)\n```", skill, re.S).group(1)
-
-
-def render_launch(repo, date="2026-01-05", loop=1):
-    """The skill's launch template as Claude Code would show it, filled in for one run."""
-    text = launch_template().replace(PLUGIN_ROOT_VAR, PLUGIN)
-    return (text.replace("<abs repo>", repo).replace("<date>", date).replace("<N>", str(loop))
-            .replace("<name>", "claude"))
 
 
 class Manifests(unittest.TestCase):
@@ -62,16 +43,15 @@ class Manifests(unittest.TestCase):
     def test_hook_commands_name_scripts_that_exist(self):
         hooks = json.loads(read(PLUGIN, "hooks", "hooks.json"))["hooks"]
         commands = [h["command"] for event in hooks.values() for group in event for h in group["hooks"]]
-        # Root hooks, the lane-return check and the tmux session lifecycle hook must all ship.
+        # The run gate, the lane-return record and the tmux session lifecycle hook must all ship.
         self.assertEqual({re.search(r'scripts/[^"]+', c).group(0) for c in commands},
-                         {"scripts/brief_header.py", "scripts/fanout_continue.py",
-                          "scripts/lane_return.py", "scripts/tmux_title_state.sh"})
+                         {"scripts/run_gate.py", "scripts/lane_return.py", "scripts/tmux_title_state.sh"})
         for command in commands:
             script = re.search(r'"\$\{CLAUDE_PLUGIN_ROOT\}/([^"]+)"', command).group(1)
             self.assertTrue(os.path.isfile(os.path.join(PLUGIN, script)), script)
 
     def test_the_bin_programs_are_executable(self):
-        for name in ("loop-lint", "loop-land", "loop-teardown", "wait-until"):
+        for name in ("loop-lint", "loop-land", "loop-teardown", "run-check", "wait-until"):
             with self.subTest(program=name):
                 self.assertTrue(os.access(os.path.join(BIN, name), os.X_OK))
 
@@ -102,98 +82,20 @@ class Programs(unittest.TestCase):
         self.assertEqual(read(BIN, "wait-until").splitlines()[0], "#!/usr/bin/env python3")
 
 
-class LaunchTemplate(unittest.TestCase):
+class LoopSkill(unittest.TestCase):
     def test_every_plugin_path_in_the_skill_exists(self):
         skill = read(PLUGIN, "skills", "loop", "SKILL.md")
         paths = re.findall(r"\$\{CLAUDE_PLUGIN_ROOT\}/([\w./<>-]+)", skill)
-        self.assertTrue(paths)
+        self.assertEqual(sorted(paths), ["protocol/loop/run-claude.md", "protocol/loop/run.md"])
         for rel in paths:
-            rel = rel.rstrip(".")
-            if "<name>" in rel:
-                for name in ("claude", "codex", "pi"):
-                    self.assertTrue(os.path.isfile(os.path.join(PLUGIN, rel.replace("<name>", name))), rel)
-            else:
-                self.assertTrue(os.path.exists(os.path.join(PLUGIN, rel)), rel)
+            self.assertTrue(os.path.isfile(os.path.join(PLUGIN, rel)), rel)
 
-    def test_the_rendered_launch_arms_the_stop_hook(self):
-        launch = loop_launch.parse_launch(render_launch("/r"), "/r", "2026-01-05T10:00:00Z", None)
-        self.assertIsNotNone(launch)
-        self.assertEqual(launch["report"], "/r/codex/closeout-2026-01-05-loop1.md")
-        self.assertEqual(launch["loop"], 1)
-
-    def test_the_rendered_launch_names_protocol_files_that_exist(self):
-        rendered = render_launch("/r")
-        named = re.findall(r"(/\S+/protocol/loop/[\w-]+\.md)", rendered)
-        self.assertEqual(len(named), 2)
-        for path in named:
-            self.assertTrue(os.path.isfile(path), path)
-
-
-class HookCase(unittest.TestCase):
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.tmp = tmp.name
-        for patcher in (
-            mock.patch.object(fanout_session, "cache_dir", return_value=os.path.join(self.tmp, "cache")),
-            mock.patch.dict(os.environ, {fanout_session.STATE_DIR_ENV: os.path.join(self.tmp, "state")}),
-        ):
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        self.repo = os.path.join(self.tmp, "repo")
-        os.makedirs(os.path.join(self.repo, ".git"))
-        os.makedirs(os.path.join(self.repo, "codex"))
-        self.transcript = os.path.join(self.tmp, "t.jsonl")
-        open(self.transcript, "w").close()
-        self.closeout = os.path.join(self.repo, "codex", "closeout-2026-01-05-loop1.md")
-
-    def say(self, text):
-        ts = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=5)).strftime(
-            "%Y-%m-%dT%H:%M:%S.000Z")
-        entry = {"type": "user", "origin": {"kind": "human"}, "timestamp": ts, "cwd": self.repo,
-                 "message": {"content": text}}
-        with open(self.transcript, "a") as fh:
-            fh.write(json.dumps(entry) + "\n")
-
-    def payload(self, **extra):
-        return dict({"session_id": "s1", "transcript_path": self.transcript, "cwd": self.repo}, **extra)
-
-
-class StopHook(HookCase):
-    def stop(self, last="Done for now."):
-        return fanout_continue.decide(self.payload(last_assistant_message=last, stop_hook_active=False))
-
-    def test_an_ordinary_session_is_never_held(self):
-        self.say("Tidy the README please.")
-        self.assertIsNone(self.stop())
-
-    def test_an_armed_root_is_held_until_its_closeout_counts(self):
-        self.say(render_launch(self.repo))
-        reason = self.stop()
-        self.assertIn(self.closeout, reason)
-        self.assertIn("does not exist yet", reason)
-        with open(self.closeout, "w") as fh:
-            fh.write("# Closeout: repo loop1 · Charter: " + "0" * 64 + "\n")
-            fh.write("".join(f"{h}\nNone\n" for h in ("## Landed", "## Parked", "## For ratification", "## Notes")))
-        self.assertIsNone(self.stop())
-
-    def test_a_paused_line_releases_the_turn(self):
-        self.say(render_launch(self.repo))
-        self.assertIsNone(self.stop("Blocked on the owner.\nPAUSED: need a deploy decision"))
-
-
-class BriefHeaderHook(HookCase):
-    def dispatch(self, prompt):
-        return brief_header.decide(self.payload(tool_name="Agent", tool_input={"prompt": prompt}))
-
-    def test_an_armed_root_needs_the_header(self):
-        self.say(render_launch(self.repo))
-        self.assertIn("loop brief header", self.dispatch("Please fix the parser."))
-        self.assertIsNone(self.dispatch("Lane: w1 · Task: ABC-1 (fix the parser) · Tier: routine\nScope: src/"))
-
-    def test_an_ordinary_session_dispatches_freely(self):
-        self.say("Map the parser for me.")
-        self.assertIsNone(self.dispatch("Please map the parser."))
+    def test_the_lane_agents_return_plain_text_with_a_status_line(self):
+        for name in ("worker", "composer", "senior", "senior-escalation", "reviewer", "scout"):
+            with self.subTest(agent=name):
+                text = read(PLUGIN, "agents", name + ".md")
+                self.assertIn("Its first line is `Status: complete`", " ".join(text.split()))
+                self.assertNotIn("lane-return", text)
 
 
 class LoopLint(unittest.TestCase):

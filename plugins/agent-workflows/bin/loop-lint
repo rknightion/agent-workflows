@@ -40,6 +40,12 @@ case-insensitively; `LOOP_LINT_OWNER_ACCOUNTS` names another path) does not list
 key set (the required `tier`, `gate`, `ci-required`, `grafana-stack`) or the size cap. An origin that cannot
 be placed stays strict, and with no such file every repository is held to both.
 
+`charter` refuses (C10) a charter whose repository's origin is a GitHub repository the own-process file
+(`authority/own-process.txt` beside this tool's repository, one `OWNER/REPO` per line, `#` comments, compared
+case-insensitively; `LOOP_LINT_OWN_PROCESS` names another path) lists: that repository runs its own process
+and the loop protocol is not used there. With no such file, or an origin that cannot be placed, nothing is
+refused.
+
 A repository whose issues live in another repository names it `tracker-repo: OWNER/REPO` in LOOP.md (valid
 only with `tracker: github` or no `tracker:` key), in the charter, or as `queue --tracker-repo OWNER/REPO`; the queue check then
 reads that repository's issues instead of origin's. The option beats the charter key, which beats LOOP.md.
@@ -103,6 +109,10 @@ BASELINE_RED = re.compile(r'^[A-Z][A-Z0-9]*-\d+(?:\.\d+)* - \S')
 # the lint names none itself, so a copy without the file exempts no repository.
 OWNER_ACCOUNTS_FILE = Path(__file__).resolve().parent.parent / 'authority' / 'owner-accounts.txt'
 OWNER_ACCOUNTS_ENV = 'LOOP_LINT_OWNER_ACCOUNTS'
+# The repositories that run their own process, where the loop protocol is not used, one `OWNER/REPO` per line;
+# the lint names none itself, so a copy without the file refuses no charter.
+OWN_PROCESS_FILE = Path(__file__).resolve().parent.parent / 'authority' / 'own-process.txt'
+OWN_PROCESS_ENV = 'LOOP_LINT_OWN_PROCESS'
 PROTOCOL = 'v4'
 # `loop-land` runs these two with a shell, so their value is the command and nothing else.
 RECIPE_KEYS = ('ci-status', 'deploy-verify')
@@ -295,6 +305,32 @@ def outside_owner_accounts(repo):
     return owner not in accounts
 
 
+def own_process_repos():
+    """The lowercase `owner/repo` entries of the own-process file: one per line, `#` starts a comment. Empty
+    when the file is absent or unreadable."""
+    path = Path(os.environ.get(OWN_PROCESS_ENV) or OWN_PROCESS_FILE)
+    try:
+        lines = path.read_text(encoding='utf-8').splitlines()
+    except (OSError, UnicodeDecodeError):
+        return set()
+    return {line.split('#')[0].strip().lower() for line in lines if line.split('#')[0].strip()}
+
+
+def check_own_process(report, repo):
+    """C10: refuse the charter of a repository whose GitHub origin the own-process file lists. An origin that
+    cannot be placed is not refused: the list names GitHub repositories only."""
+    listed = own_process_repos()
+    if not listed:
+        return
+    try:
+        slug = origin_slug(repo)
+    except GhError:
+        return
+    if slug.lower() in listed:
+        report.error('C10', 1, f'{slug} runs its own process; the loop protocol is not used there, so no '
+                               'loop is prepared for it')
+
+
 def effective_tracker(repo, keys):
     """The tracker a LOOP.md's `keys` name: `tracker:`, else GitHub for a `tracker-repo:`, else Backlog
     when the repository has a `backlog/` directory and GitHub otherwise."""
@@ -404,12 +440,12 @@ def lint_loopmd(path, offline, repo_arg=None):
     if 'reviewer' in keys:
         if re.fullmatch(r'code[ _-]?rabbit', keys['reviewer'], re.I):
             report.error('L2', where['reviewer'], f'invalid `reviewer:` value {keys["reviewer"]!r}: the '
-                         'CodeRabbit profile is retired (copilot | cursor)')
+                         'CodeRabbit profile is retired (codex | copilot | cursor)')
         elif keys['reviewer'] == 'kodus':
             report.error('L2', where['reviewer'], "invalid `reviewer:` value 'kodus': the Kodus profile is "
-                         'retired (copilot | cursor)')
+                         'retired (codex | copilot | cursor)')
         else:
-            need('reviewer', lambda v: v in ('copilot', 'cursor'), 'copilot | cursor')
+            need('reviewer', lambda v: v in ('codex', 'copilot', 'cursor'), 'codex | copilot | cursor')
     if 'landing' in keys:
         need('landing', lambda v: v in ('direct', 'pr'), 'direct | pr')
     if 'landing-branch' in keys:
@@ -419,17 +455,8 @@ def lint_loopmd(path, offline, repo_arg=None):
              and v != 'HEAD' and run(['git', 'check-ref-format', '--branch', v]).returncode == 0,
              'a valid named landing branch')
     if 'review' in keys:
-        need('review', lambda v: v == 'local-pair', 'local-pair')
-        if keys.get('review') == 'local-pair':
-            if keys.get('landing', 'direct') == 'direct' and not keys.get('landing-branch'):
-                report.error('L2', where['review'], 'direct local-pair requires landing-branch')
-            if 'reviewer' in keys:
-                report.error('L2', where['review'], 'local-pair cannot also select a hosted reviewer')
-    for key in ('review-status', 'gate-status', 'merge-hold'):
-        if key in keys and not keys[key]:
-            report.error('L2', where[key], f'`{key}:` is empty; drop the key or name the command')
-    if 'merge-hold' in keys and keys.get('landing') != 'pr':
-        report.error('L2', where['merge-hold'], '`merge-hold:` applies only to PR landing')
+        report.error('L2', where['review'], '`review:` is retired: the profile it selected is gone; select a '
+                                            'hosted profile with `reviewer:` (codex | copilot | cursor)')
     if 'release-on-push' in keys and keys['release-on-push'] not in ('yes', 'no'):
         report.error('L2', where['release-on-push'], f'invalid `release-on-push:` value '
                                                      f'{keys["release-on-push"]!r} (yes | no)')
@@ -669,6 +696,7 @@ def lint_charter(path, repo_arg=None, offline=False):
 
     # What loop-land will read for this repository: LOOP.md, then the Standing file's `## Commands`.
     repo = Path(repo_arg) if repo_arg else Path(path).resolve().parent.parent
+    check_own_process(report, repo)
     loopmd = repo / 'LOOP.md'
     loop_keys = {}
     if loopmd.is_file():

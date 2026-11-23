@@ -1,10 +1,10 @@
 # agent-workflows
 
-A loop is one long Claude Code session, the root, that works a tracker queue (GitHub issues or a
-Backlog.md board) in waves: it hands each task to a pinned subagent lane in its own git worktree,
-reviews and lands what comes back, and stops only when it has written a closeout. This repository is
-a Claude Code plugin marketplace that packages what makes that work, plus the protocol (Loop v4) the
-root and its lanes follow.
+A run is one Claude Code session, the root, that works a goal across many tasks: it does small
+things itself, hands the rest to pinned subagent lanes in their own git worktrees, reads every diff,
+lands each pull request on its own, and stops with a closeout. This repository is a Claude Code
+plugin marketplace that packages what makes that work, plus the one-page protocol (`protocol/loop/run.md`)
+the root follows.
 
 The write-up is at https://rob-knight.com/loop/ and the rendered protocol is at
 https://rob-knight.com/reference/.
@@ -13,45 +13,31 @@ https://rob-knight.com/reference/.
 
 Everything lives in `plugins/agent-workflows/`.
 
-- `skills/loop/`: the `loop` skill (`/agent-workflows:loop`). It prepares a run: the charter, the
-  lane rules and the launch file, linted, for you to launch.
-- `agents/`: the six lane roles, each with its model and effort pinned:
+- `skills/loop/`: the `loop` skill (`/agent-workflows:loop <what you want>`). It starts a run in the
+  session you invoke it in: the root reads `protocol/loop/run.md` and its Claude appendix and begins.
+- `agents/`: the six lane roles, each with its model and effort pinned. A brief gives the goal, the
+  check that proves it, what is in and out of scope, and what to send back; the lane decides what the
+  goal implies and returns plain text whose first line is `Status: complete`, `partial`, `blocked`
+  or `failed`:
 
   | Agent | Model / effort | Use |
   |---|---|---|
-  | `agent-workflows:worker` | Sonnet 5.5 / high | the default for every task: proven red then green, handed back as a patch |
-  | `agent-workflows:composer` | Sonnet 5.5 / high | composing a landing batch or a board batch, committed locally |
-  | `agent-workflows:senior` | Opus 5.5 / medium | a shared-contract freeze, an unknown cause, a security or privacy call, a design return, an escalated failure |
-  | `agent-workflows:senior-escalation` | Opus 5.5 / xhigh | a task that has already failed review rounds |
+  | `agent-workflows:worker` | Sonnet 5.5 / medium | the default for every task: proven red then green, committed locally |
+  | `agent-workflows:composer` | Sonnet 5.5 / medium | putting several lane branches or small changes onto one branch |
+  | `agent-workflows:senior` | Opus 5.5 / high | a shared interface, an unknown cause, a security or privacy call, a task where a wrong answer could pass |
+  | `agent-workflows:senior-escalation` | Opus 5.5 / high | a task that has failed or been parked twice |
   | `agent-workflows:reviewer` | Opus 5.5 / high | read-only review, PASS or FAIL with findings |
   | `agent-workflows:scout` | Sonnet 5.5 / medium | read-only mapping, sweeps and log reduction |
 
-- `hooks/hooks.json` and `scripts/`: two root hooks. The Stop hook re-prompts a root that ends its turn
-  before its closeout counts, up to three times in a row, unless its last line is a `PAUSED:` line
-  or a `WAITING: ... until <UTC time>` line. Under a `protocol: v4` charter a closeout counts only
-  when the run's `loop-land` ledger is settled: every merged landing verified with main and any
-  deploy read, no unmerged landing left at `ready` (verify it or abandon it), and a
-  `loop-land summary --check` newer than the last merge. A charter with `loop-land: off` is judged
-  on the closeout file alone. The PreToolUse hook denies a root's lane dispatch whose brief does not
-  open with the contract's header line. Both arm only in a session whose operator message is a loop
-  launch ("You are the root" plus one closeout path), never in ordinary sessions, and both let the
-  call through on any fault of their own.
-- The plugin also registers a global SubagentStop lane hook, `scripts/lane_return.py`. It
-  requires a nonempty `agent_id` and an exact `agent-workflows:worker`, `agent-workflows:composer`, `agent-workflows:senior`,
-  `agent-workflows:senior-escalation`, `agent-workflows:reviewer` or `agent-workflows:scout` type.
-  Root sessions (including `--agent`), unrelated agents and empty-type forks are no-ops; the
-  registration matcher alone is not the authority. Plugin-agent frontmatter hooks are not used.
-  It sends a lane back to repair its return when the lane-return block is missing, malformed or
-  duplicated, lacks or mistypes a field, names a patch whose sha256 does not match (the reason
-  names both hashes, or the unreadable path), names a review record without an absolute evidence
-  path, or reports `complete` with a nonzero check exit.
-  Honest partial/blocked returns, read-only null patches and composer, senior and senior-escalation commit SHAs
-  remain valid; a reviewer or scout returns `"review":null`, because its verdict or answer is its
-  message. Return fences are limited to 1,800 UTF-16 units and JSON nesting to 32; decoder
-  failures block rather than fail open. The hook writes no state and repeated stops still
-  validate, but Claude's native consecutive-stop-block cap (default 8) can end a lane despite
-  later block requests. No hook inspects lane commands: the lanes' no-push rule lives in the agent
-  definitions.
+- `hooks/hooks.json` and `scripts/`: the run gate and the lane record. A run keeps its files in
+  `codex/run-<YYYYMMDD>-<n>/`; the root writes an `UNATTENDED` file there when you leave and removes it
+  when you are back. While it is there and the run has no `CLOSEOUT.md`, `scripts/run_gate.py` refuses
+  the root's question prompt (the root parks the question in `PARKED.md` and carries on) and sends
+  the root back to work when it ends a turn, at most three times in a row, unless its reply ends with
+  a `WAITING:` line. Both act only on the main thread of a session whose transcript names that run
+  folder, never on a subagent, and both let the call or the stop through on any fault of their own.
+  `scripts/lane_return.py` (SubagentStop, the six roles only) reads a lane's status line, branch and
+  commit and appends them to a record; it never sends a lane back over the shape of its return.
 - `scripts/tmux_title_state.sh`: hooks that put the session's state (working, waiting, done,
   failed) in a tmux pane option, `@cc_state`, for a tmux title to show. Outside tmux they do
   nothing.
@@ -64,6 +50,9 @@ Everything lives in `plugins/agent-workflows/`.
     the merge did to main and any deploy; `abandon` and `summary` close the record. It never merges
     or pushes itself, and it keeps its ledger in the run directory (`landings.jsonl`). Two states stop
     a run on purpose: see "When `loop-land` stops on purpose" below.
+  - `run-check`: the run brief's checks. `land` says whether a pull request may land now and refuses
+    guarded diffs until the root signs them off, `reap` removes the run's merged worktrees and `close`
+    says whether the run can close. It never merges or pushes.
   - `loop-teardown`: removes the worktrees, caches and large logs a run left behind (`closeout` for
     one run, `reap` for every finished run of a repository), archiving anything not already on a
     remote first. It is a dry run unless given `--apply`.
@@ -74,11 +63,10 @@ Everything lives in `plugins/agent-workflows/`.
   read-only tools, and prints a PASS or FAIL verdict as JSON. On 59 replayed reviews it caught as
   many defects as Opus reviewer lanes (8 of 11 each) with no false blocks, at about $0.05 a review
   against about $1.09. It is optional and needs your own gateway: see `tools/dsreview/README.md`.
-- `tools/tracker/`: `tracker`, the one way the loop root writes GitHub issues and a GitHub Project:
-  `queue` lists the ready issues, and `create`, `claim`, `status`, `handoff`, `tick` and `close` write
-  them. Lanes never run it. `close --pr` closes an issue only on a merged pull request's passing
-  acceptance evidence. It runs as your `gh` login or, optionally, as a GitHub App through
-  `with-token`. The protocol's `just tracker <command>` is a recipe of your own that runs it: see
+- `tools/tracker/`: `tracker`, a thin shim over `gh` for GitHub issues and labels: `queue` lists the
+  open issues labelled `ready`, and `create`, `claim`, `status`, `handoff`, `tick` and `close` write
+  them as your `gh` login. `close` posts an evidence comment, then closes the issue. The protocol's
+  `just tracker <command>` is a recipe of your own that runs it: see
   `protocol/README.md` and `tools/tracker/README.md`.
 - `protocol/`: the contract, the three harness files, the charter and lane templates, the planner,
   the review profiles and the board setup guide. See `protocol/README.md`.
@@ -101,8 +89,7 @@ Everything lives in `plugins/agent-workflows/`.
     and `loop-lint queue` read tasks through.
 - Recommended: `just`, because the protocol's gate and verification examples are `just` recipes
   (any gate command works).
-- For the tracker tool, only if you use it: Python 3.12 or later, `gh` signed in with the `project`
-  scope, and a GitHub Project with the fields `protocol/README.md` lists.
+- For the tracker tool, only if you use it: Python 3.12 or later and `gh` signed in.
 - Optional: `dsreview` (in this plugin, Python 3.12 or later and a Cloudflare AI Gateway with a
   DeepSeek key), one command that can fill the lane template's local review step. With no local
   reviewer, the planner freezes `none` there and lanes return `"review":null`.
@@ -177,29 +164,15 @@ one skill, six agents and the hooks.
 
    Inside Claude Code, check it with `loop-lint loopmd LOOP.md --offline`.
 
-## Run a first loop
+## Start a run
 
-1. In the repository, run `/agent-workflows:loop`. The skill reads the planner and the tracker,
-   asks you every decision the first wave needs in one round, then writes
-   `codex/charter-<date>-loop1.md`, `codex/loop1/LANE.md` and `codex/launch-<date>-loop1.txt`,
-   lints them and gives you the launch file's path.
-2. Start a fresh session with the command on the launch file's `cmd:` line (for example
-   `claude --model claude-opus-5-5 --effort medium --disallowedTools AskUserQuestion`) and paste the
-   rest of the file as the first message. That message arms the hooks.
-3. The root works the queue, landing each batch with `loop-land`, until it writes
-   `codex/closeout-<date>-loop1.md` and replies with its path. For the next run, pass that closeout
-   to the skill: `/agent-workflows:loop <closeout path>`.
-
-The launch file names the contract and the harness file by absolute path inside the installed
-plugin. Claude Code keeps a previous plugin version on disk for 14 days after an update, so prepare
-and launch a run in the same sitting.
-
-### Landing without `loop-land`
-
-`loop-land: off` in the charter turns the landing tool off for that run. The root then merges once
-every gate leg and required check on the head is green, waits on main's CI for the merge commit with
-`wait-until`, and keeps no ledger, and the Stop hook judges the closeout on the file alone. The skill
-writes the line only when you ask for it.
+1. In the repository, in a session at Opus 5.5 and high effort, run `/agent-workflows:loop <what you
+   want>`. The root reads the run brief, asks you everything it needs in one batch, writes the run
+   files in `codex/run-<YYYYMMDD>-<n>/` and starts work.
+2. When you leave, say so: the root writes `UNATTENDED` in the run folder, and from then on parks its
+   questions instead of asking. Tell it when you are back.
+3. The run stops when the goal is met or the queue is empty, with every worktree gone and a
+   `CLOSEOUT.md` in the run folder.
 
 ### When `loop-land` stops on purpose
 
@@ -225,32 +198,24 @@ merge commit on main. Exit 40 means it is not adoptable and 41 means the ledger 
 merge. If the merged change is not what the run meant to land, do not adopt: fix forward by hand and
 say so in the closeout.
 
-### Standing authority
-
-A charter can point at a Standing file: per-repository grants (live reads, deploy targets) that
-carry from run to run. It is optional and none by default: the skill writes `codex/standing.md`
-holding `No standing grants.` and pins its sha256 in the charter and the launch file. Per-run
-grants go in the charter's `authority:` lines.
-
 ## What the hooks write outside the repository
 
-- A scan cache per session in the system temp directory, under `agent-workflows-fanout/`.
-- One line per Stop decision, and an incident file when the hook gives up or faults, under
-  `~/.local/state/agent-loops/`. An external watchdog in the author's setup reads them; nothing in
-  this repository does, and you can delete them at any time.
+- Under `~/.local/state/agent-loops/`: one line per lane return in `lane-returns/<session>.jsonl`
+  (status, branch and commit), and the count of turn-end continuations in `run-stop/<session>.json`.
+  Nothing in this repository reads the first; you can delete either at any time.
 
 ## Not included
 
-- Codex, pi and Claude-on-GPT runtimes. Their harness files are in `protocol/loop/` for
-  reference, but this plugin supplies only the Claude Code hooks and agents.
+- pi and Codex runtimes. The pi appendix and the Loop v4 harness files are in `protocol/loop/` for
+  reference, but this plugin supplies only the Claude Code hooks and agents. Codex is not a run root.
 - Tools from the author's own setup: syncing `codex/` between machines, the session catalogue that reports a run's usage, the remote gate
   runner, the watchdog and scheduled verification. The protocol mentions some of them; skip those
   steps.
 
 ## Development
 
-`just check` runs the syntax checks and the tests in `tests/`, which drive the hooks, the launch
-template and `loop-lint` against temporary repositories, run `wait-until` to a pass and to a
+`just check` runs the syntax checks and the tests in `tests/`, which drive the hooks over
+Claude-shaped input and `loop-lint` against temporary repositories, run `wait-until` to a pass and to a
 timeout, and drive `dsreview` against a local fake gateway. It also runs the `loop-land` tests, which
 drive every command of the landing tool against temporary repositories with a stand-in `gh`, and the
 tracker tests, which drive the tracker against a stand-in `gh` (they skip below Python 3.12).

@@ -47,11 +47,11 @@ board lane; GitHub issues and Projects, never), and never touch credentials or l
   Fix verified critical/major findings, re-prove and review repair deltas; where `LANE.md` gives a
   component's triage to the root, return its findings untriaged instead. Explain disputed findings
   in `return.md`. Missing/incomplete verdicts are not PASS: apply the frozen failure policy without
-  provider/key substitution. Guarded security review and local-pair obligations still apply.
+  provider/key substitution. Guarded security review obligations still apply.
   Skip only the categories the context policy allows, recording the reason. Record a named review
   result and an absolute evidence artifact; the root reads the artifact before accepting it.
-- Long waits (a gate slot, a test run) are fine: your prompt cache lasts an hour. Keep each Bash
-  call under its 10-minute limit and re-invoke on expiry.
+- Long waits for a gate slot or a test run are fine. Keep each Bash call under its 10-minute limit
+  and re-invoke on expiry.
 - Wait through `wait-until`, never a `sleep` loop:
   `wait-until --timeout <duration> --what "<description>" [--every <seconds>] -- <test command>`.
   `--what` is required and the test command runs without a shell. Exit 0 means the test passed,

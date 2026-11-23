@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Refuse raw GitHub writes in a shell command; the tracker (tracker.py beside this file) is the one place they are made.
+"""Refuse GitHub Project writes in a shell command: issues and labels are the tracker now, and nothing writes a Project.
+
+Issue writes (create, label, comment, close) are made with plain gh and are allowed; so is everything on a pull request.
 
 Defence in depth for a PreToolUse hook, not a security boundary: it reads the command the way a shell
 splits it and cannot see a write built at run time. Exit 0 allows, exit 2 refuses with the reason on
 stderr (the status a Claude Code hook treats as a block).
 
-    guard.py --command 'gh issue close 5'
+    guard.py --command 'gh project item-add 1 --url u'
     guard.py < hook-payload.json        # a PreToolUse payload, or the bare command text
 """
 import argparse
@@ -16,10 +18,9 @@ import re
 import shlex
 import sys
 
-ISSUE_WRITES = {"comment", "create", "edit", "close", "reopen", "develop", "delete", "lock", "unlock", "transfer", "pin", "unpin"}
-PR_WRITES = {"comment"}  # PRs carry code; only a PR comment is the tracker's comment-discipline surface
 PROJECT_READS = {"list", "view", "item-list", "field-list"}
-GUARDED_PATH = re.compile(r"(?:^|/)(?:issues|comments|projectsV2|projects)(?:/|\?|$)")
+GUARDED_PATH = re.compile(r"(?:^|/)(?:projectsV2|projects)(?:/|\?|$)")
+PROJECT_MUTATION = re.compile(r"project(?:v2|card|column)|(?:create|update|delete|close|copy|link|unlink)project", re.I)
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.S)
 SKIP_WORDS = {"{", "}", "!", "then", "do", "else", "elif", "if", "while", "until", "time", "builtin", "exec", "command", "nohup", "setsid", "caffeinate"}
@@ -30,7 +31,7 @@ API_VALUE_FLAGS = {"-X", "--method", "-H", "--header", "-f", "--raw-field", "-F"
                    "--cache", "--hostname", "-p", "--preview"}
 REPO_FLAGS = {"-R", "--repo"}
 SEPARATORS = re.compile(r"[;&|()<>\n]+")
-HELP = "run it through the tracker (agent-workflows tools/tracker/README.md); lanes never write to GitHub"
+HELP = "the Project is closed and nothing writes it; track work with issues and labels (agent-workflows tools/tracker/README.md)"
 
 
 def _line_runs_a_shell(line):
@@ -250,16 +251,17 @@ def _graphql_mutates(fields, has_input, inputs):
                     value = Path(value[1:]).read_text(encoding="utf-8")
                 except OSError:
                     return True
-            if re.search(r"\bmutation\b", value, re.I):
+            if re.search(r"\bmutation\b", value, re.I) and PROJECT_MUTATION.search(value):
                 return True
-    if has_input:
-        for path in inputs:
-            try:
-                if re.search(r"\bmutation\b", Path(path).read_text(encoding="utf-8"), re.I):
-                    return True
-            except OSError:
-                return True
-        return True
+    for path in inputs:
+        if path == "-":
+            return True  # a query on stdin cannot be read here
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            return True
+        if re.search(r"\bmutation\b", text, re.I) and PROJECT_MUTATION.search(text):
+            return True
     return False
 
 
@@ -306,14 +308,10 @@ def _gh(args):
     if not words:
         return None
     group, sub = words[0], words[1] if len(words) > 1 else ""
-    if group == "issue" and sub in ISSUE_WRITES:
-        return f"gh issue {sub}"
-    if group == "pr" and sub in PR_WRITES:
-        return f"gh pr {sub}"
     if group == "project" and sub and sub not in PROJECT_READS:
         return f"gh project {sub}".strip()
     if group == "api" and _gh_api(args[args.index("api") + 1:] if "api" in args else []):
-        return "gh api (a write to an issue, pull request or Project path, or a GraphQL mutation)"
+        return "gh api (a write to a Project path, or a GraphQL mutation of a Project)"
     return None
 
 
@@ -341,15 +339,13 @@ def _scan(text, found):
 
 
 _FALLBACK = re.compile(
-    r"\bgh\s+(?:issue\s+(?:comment|create|edit|close|reopen|develop|delete|lock|unlock|transfer|pin|unpin)"
-    r"|pr\s+comment"
-    r"|project\s+(?!list\b|view\b|item-list\b|field-list\b)\S+"
-    r"|api\b.*(?:-X|--method)[ =]?(?:POST|PATCH|PUT|DELETE)\b.*"
-    r"|api\b.*\bmutation\b)", re.I)
+    r"\bgh\s+(?:project\s+(?!list\b|view\b|item-list\b|field-list\b)\S+"
+    r"|api\b.*(?:-X|--method)[ =]?(?:POST|PATCH|PUT|DELETE)\b.*projects"
+    r"|api\b.*\bmutation\b.*projectv2)", re.I)
 
 
 def check(command):
-    """Return one message per raw GitHub write in the command; empty means it may run."""
+    """Return one message per Project write in the command; empty means it may run."""
     # The shell deletes a backslash-newline outright (it does not become a space), so `g\<NL>h` is `gh`.
     text = _strip_heredocs(re.sub(r"\\\r?\n", "", command or ""))
     found = []
@@ -363,7 +359,7 @@ def check(command):
         except ValueError:
             # The shell would not parse it either; scan the raw text rather than wave it through.
             found += [m.group(0).split("\n")[0][:40] for m in _FALLBACK.finditer(text)]
-    return [f"raw GitHub write refused ({hit}): {HELP}" for hit in dict.fromkeys(found)]
+    return [f"GitHub Project write refused ({hit}): {HELP}" for hit in dict.fromkeys(found)]
 
 
 def _command_from(stdin_text):

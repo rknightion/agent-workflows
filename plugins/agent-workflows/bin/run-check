@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+"""run-check: the three things a run must not get wrong, checked from git and gh with no state.
+
+  run-check land  --repo <dir> --pr <n> --head <sha> [--signed-off "<who and why>"]
+  run-check reap  --root <dir> [--apply]
+  run-check close --root <dir> --run <run folder> [--repo <dir>]... [--prefix <branch prefix>]
+
+land exits 0 clear, 3 refused (hits one per line), 4 not ready, 2 usage or tool error. It never
+merges. reap removes the worktrees under <dir> whose pull request merged, with their local
+branches (only with --apply). close exits 0 only when no worktree is left under <dir> and every
+unmerged branch of the run is an open draft pull request or has a patch under <run>/patches/;
+otherwise 3.
+"""
+import argparse
+import fnmatch
+import json
+import os
+import re
+import subprocess
+import sys
+
+CLEAR, ERROR, REFUSED, NOT_READY = 0, 2, 3, 4
+HANDBACK = {'return.md', 'PR.md', 'candidate.patch'}
+# Ignored directories reap may delete with a worktree: the regenerable caches loop-teardown also strips.
+REGEN = {'node_modules', '.terraform', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache'}
+
+TEST_FILE = re.compile(r'(^|/)(tests?|__tests__|spec)/|(^|/)test_[^/]*\.py$|_test\.(py|go)$'
+                       r'|\.(test|spec)\.[cm]?[jt]sx?$')
+SKIP_MARKERS = [
+    (('.py',), re.compile(r'pytest\.mark\.(skip|skipif|xfail)\b|pytest\.(skip|xfail)\(|unittest\.skip|\.skipTest\(')),
+    (('.go',), re.compile(r'\b[tb]\.Skip(f|Now)?\(')),
+    (('.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.mts', '.cts'),
+     re.compile(r'\b(it|test|describe)\.skip\b|\bx(it|test|describe)\s*\(')),
+    (('.rs',), re.compile(r'#\[ignore\b')),
+]
+SNAPSHOT = re.compile(r'snapshot|golden|baseline|\.snap$', re.I)
+ALLOWLIST = re.compile(r'allow[-_.]?list|whitelist|safe[-_]?list', re.I)
+
+
+class Fail(Exception):
+    """A usage or tool error: exit 2."""
+
+
+def run(cmd, cwd=None, check=True):
+    try:
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    except OSError as e:
+        raise Fail(f'{cmd[0]}: {e}')
+    if check and r.returncode != 0:
+        raise Fail(f'{" ".join(cmd[:3])} failed: {(r.stderr or r.stdout).strip()[:300]}')
+    return r
+
+
+def git(cwd, *args, check=True):
+    return run(['git', '-C', str(cwd), *args], check=check)
+
+
+def gh_json(cwd, *args):
+    out = run(['gh', *args], cwd=cwd).stdout
+    try:
+        return json.loads(out)
+    except ValueError:
+        raise Fail(f'gh {" ".join(args[:2])} returned invalid JSON')
+
+
+def loop_keys(repo):
+    """The key: value lines of LOOP.md at the tip of origin's default branch, freshly fetched.
+
+    Never the checkout: a pull request branch checked out there could unguard itself."""
+    m = re.search(r'^ref: refs/heads/(\S+)\tHEAD$', git(repo, 'ls-remote', '--symref', 'origin', 'HEAD').stdout, re.M)
+    if not m:
+        raise Fail("cannot read origin's default branch")
+    ref = f'refs/remotes/origin/{m.group(1)}'
+    git(repo, 'fetch', '-q', 'origin', f'+refs/heads/{m.group(1)}:{ref}')
+    shown = git(repo, 'show', f'{ref}:LOOP.md', check=False)
+    keys = {}
+    for line in (shown.stdout if shown.returncode == 0 else '').splitlines():
+        m = re.match(r'^([a-z][a-z0-9-]*):\s*(.*)$', line.strip())
+        if m:
+            keys.setdefault(m.group(1), m.group(2).strip())
+    return keys
+
+
+def globs(value):
+    items = [g.strip() for g in (value or '').split(',') if g.strip()]
+    return [] if items in ([], ['none']) else items
+
+
+def guarded(path, patterns):
+    return any(fnmatch.fnmatchcase(path, g) or ('/' not in g and fnmatch.fnmatchcase(os.path.basename(path), g))
+               for g in patterns)
+
+
+def parse_diff(text):
+    """Per file of a unified diff: its paths, whether deleted, and its added and removed lines."""
+    files, cur = [], None
+    for line in text.splitlines():
+        if line.startswith('diff --git '):
+            body = line[len('diff --git '):].replace('"', '')
+            same = body[2:2 + (len(body) - 5) // 2]
+            cur = {'paths': {same} if body == f'a/{same} b/{same}' else set(),
+                   'deleted': False, 'added': [], 'removed': []}
+            files.append(cur)
+        elif cur is None:
+            continue
+        elif line.startswith('deleted file mode'):
+            cur['deleted'] = True
+        elif line.startswith(('rename from ', 'rename to ')):
+            cur['paths'].add(line.split(' ', 2)[2])
+        elif line.startswith(('--- a/', '+++ b/')):
+            cur['paths'].add(line[6:].replace('"', ''))
+        elif line.startswith('+') and not line.startswith('+++ '):
+            cur['added'].append(line[1:])
+        elif line.startswith('-') and not line.startswith('--- '):
+            cur['removed'].append(line[1:])
+    return files
+
+
+def refusals(diff_text, guard_globs):
+    hits = []
+    for f in parse_diff(diff_text):
+        for path in sorted(f['paths']):
+            if guarded(path, guard_globs):
+                hits.append(f'guarded-path: {path}')
+            if SNAPSHOT.search(path):
+                hits.append(f'snapshot-or-baseline: {path}')
+            if ALLOWLIST.search(os.path.basename(path)):
+                hits.append(f'allowlist: {path}')
+            if f['deleted'] and TEST_FILE.search(path):
+                hits.append(f'test-deleted: {path}')
+            for exts, marker in SKIP_MARKERS:
+                if path.endswith(exts) and not f['deleted']:
+                    new = sum(bool(marker.search(l)) for l in f['added'])
+                    old = sum(bool(marker.search(l)) for l in f['removed'])
+                    if new > old:
+                        hits.append(f'test-skipped: {path} ({new - old} new skip marker(s))')
+    return list(dict.fromkeys(hits))
+
+
+def pr_checks(repo, pr, required):
+    r = run(['gh', 'pr', 'checks', str(pr), '--json', 'name,state,bucket'] + (['--required'] if required else []),
+            cwd=repo, check=False)
+    if r.returncode != 0:
+        if 'no required checks reported' in r.stderr or 'no checks reported' in r.stderr:
+            return []
+        raise Fail(f'gh pr checks failed: {(r.stderr or r.stdout).strip()[:300]}')
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        raise Fail('gh pr checks returned invalid JSON')
+
+
+def land(a):
+    repo = os.path.abspath(a.repo)
+    view = lambda: gh_json(repo, 'pr', 'view', str(a.pr), '--json', 'headRefOid,state')
+    pr = view()
+    if pr.get('state') != 'OPEN':
+        print(f'not ready: pull request #{a.pr} is {pr.get("state")}')
+        return NOT_READY
+    if pr.get('headRefOid') != a.head:
+        print(f'not ready: head is {pr.get("headRefOid")}, not {a.head}')
+        return NOT_READY
+    keys = loop_keys(repo)
+    hits = refusals(run(['gh', 'pr', 'diff', str(a.pr), '--color', 'never'], cwd=repo).stdout,
+                    globs(keys.get('guarded-paths')))
+    waiting, seen, named = [], set(), globs(keys.get('ci-required'))
+    required = pr_checks(repo, a.pr, True)
+    for c in required + [c for c in pr_checks(repo, a.pr, False) if c.get('name') in named and c not in required]:
+        seen.add(c.get('name'))
+        if c.get('bucket') not in ('pass', 'skipping'):
+            waiting.append(f'check {c.get("name")}: {c.get("bucket")} ({c.get("state")})')
+    for name in named:
+        if name not in seen:
+            waiting.append(f'check {name}: not reported (named by LOOP.md ci-required)')
+    if view().get('headRefOid') != a.head:
+        print('not ready: the head moved while checking')
+        return NOT_READY
+    for h in hits:
+        print(h)
+    if hits and a.signed_off:
+        print(f'signed off: {a.signed_off}')
+    for w in waiting:
+        print(f'not ready: {w}')
+    if hits and not a.signed_off:
+        print(f'refused: {len(hits)} hit(s); a merge needs --signed-off')
+        return REFUSED
+    if waiting:
+        return NOT_READY
+    print(f'clear: #{a.pr} at {a.head}')
+    return CLEAR
+
+
+def worktrees(root):
+    """Linked git worktrees at or under root (never a main checkout or a submodule)."""
+    root, found = os.path.realpath(root), {}
+    if not os.path.isdir(root):
+        raise Fail(f'no such directory: {root}')
+
+    def consider(path):
+        r = git(path, 'rev-parse', '--absolute-git-dir', '--git-common-dir', check=False)
+        if r.returncode == 0:
+            gd, common = r.stdout.split('\n')[:2]
+            if os.path.realpath(gd) != os.path.realpath(os.path.join(path, common)):
+                found[os.path.realpath(path)] = True
+            return True
+        return False
+
+    for dirpath, dirs, files in os.walk(root):
+        if '.git' in files:
+            consider(dirpath)
+            dirs[:] = []
+        elif '.git' in dirs:
+            for line in git(dirpath, 'worktree', 'list', '--porcelain', check=False).stdout.splitlines():
+                p = os.path.realpath(line[9:]) if line.startswith('worktree ') else ''
+                if p and (p + '/').startswith(root + '/') and os.path.isdir(p):
+                    consider(p)
+            dirs[:] = []
+    return sorted(found)
+
+
+def pr_for(cwd, branch):
+    """The newest pull request whose head is branch, or None."""
+    prs = gh_json(cwd, 'pr', 'list', '--head', branch, '--state', 'all', '--limit', '20',
+                  '--json', 'number,state,isDraft,headRefOid,headRefName')
+    prs = [p for p in prs if p.get('headRefName', branch) == branch]
+    return max(prs, key=lambda p: p['number']) if prs else None
+
+
+def reap(a):
+    for wt in worktrees(a.root):
+        branch = git(wt, 'rev-parse', '--abbrev-ref', 'HEAD').stdout.strip()
+        if branch == 'HEAD':
+            print(f'kept {wt}: detached HEAD, no branch to look up')
+            continue
+        status = git(wt, 'status', '--porcelain', '--untracked-files=all', '--ignored').stdout.splitlines()
+        dirty = [l[3:] for l in status if not l.startswith(('??', '!!'))]
+        stray = [l[3:] for l in status if l.startswith('??') and l[3:] not in HANDBACK]
+        stray += [l[3:] for l in status if l.startswith('!!') and not REGEN & set(l[3:].rstrip('/').split('/'))]
+        pr = pr_for(wt, branch)
+        tip = git(wt, 'rev-parse', 'HEAD').stdout.strip()
+        if not pr or pr['state'] != 'MERGED':
+            state = f'pull request #{pr["number"]} {pr["state"].lower()}' if pr else 'no pull request'
+            print(f'kept {wt} ({branch}): {state}' + ('; uncommitted changes to tracked files' if dirty else ''))
+            continue
+        merged_head = pr.get('headRefOid', '')
+        if tip != merged_head and git(wt, 'merge-base', '--is-ancestor', tip, merged_head, check=False).returncode:
+            print(f'kept {wt} ({branch}): commits after the merged head of #{pr["number"]}')
+            continue
+        if dirty or stray:
+            print(f'kept {wt} ({branch}): #{pr["number"]} merged but files would be lost: '
+                  + ', '.join((dirty + stray)[:5]))
+            continue
+        if not a.apply:
+            print(f'would remove {wt} and branch {branch} (#{pr["number"]} merged)')
+            continue
+        common = os.path.realpath(os.path.join(wt, git(wt, 'rev-parse', '--git-common-dir').stdout.strip()))
+        git(common, 'worktree', 'remove', '--force', wt)
+        git(common, 'branch', '-D', branch)
+        print(f'removed {wt} and branch {branch} (#{pr["number"]} merged)')
+    return CLEAR
+
+
+def close(a):
+    run_dir = os.path.abspath(a.run)
+    repos = a.repo or [git(run_dir, 'rev-parse', '--show-toplevel').stdout.strip()]
+    merged, kept, blocking = [], [], [f'worktree left: {wt}' for wt in worktrees(a.root)]
+    for repo in repos:
+        repo = os.path.abspath(repo)
+        default = git(repo, 'symbolic-ref', '--short', '-q', 'refs/remotes/origin/HEAD', check=False).stdout.strip()
+        skip = {default.split('/', 1)[-1], 'main', 'master'}
+        local = [b for b in git(repo, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/').stdout.split()
+                 if b not in skip and (not a.prefix or b.startswith(a.prefix))]
+        prs = {b: pr_for(repo, b) for b in local}
+        if a.prefix:
+            for p in gh_json(repo, 'pr', 'list', '--state', 'all', '--limit', '500',
+                             '--json', 'number,state,isDraft,headRefOid,headRefName'):
+                b = p.get('headRefName', '')
+                if b.startswith(a.prefix) and (b not in prs or not prs[b] or p['number'] > prs[b]['number']):
+                    prs[b] = p
+        for b, pr in sorted(prs.items()):
+            # <run>/patches/<repository folder name>/<branch, % and / percent-encoded>.patch: one name per branch.
+            patch = os.path.join(run_dir, 'patches', os.path.basename(repo),
+                                 b.replace('%', '%25').replace('/', '%2F') + '.patch')
+            tip = git(repo, 'rev-parse', '-q', '--verify', f'refs/heads/{b}', check=False).stdout.strip()
+            pr_head = (pr or {}).get('headRefOid') or ''
+            covered = not tip or tip == pr_head or (pr_head and not git(
+                repo, 'merge-base', '--is-ancestor', tip, pr_head, check=False).returncode)
+            kind = 'merged' if pr and pr['state'] == 'MERGED' else (
+                'draft' if pr and pr['state'] == 'OPEN' and pr.get('isDraft') else None)
+            if kind == 'merged' and covered:
+                merged.append(f'{b} (#{pr["number"]})')
+            elif kind == 'draft' and covered:
+                kept.append(f'{b}: draft pull request #{pr["number"]}')
+            elif os.path.isfile(patch):
+                kept.append(f'{b}: {patch}')
+            else:
+                why = (f'commits after the head of {kind} pull request #{pr["number"]}' if kind else
+                       f'pull request #{pr["number"]} {pr["state"].lower()}, not a draft' if pr else 'no pull request')
+                blocking.append(f'unlanded with nothing kept: {b} ({why}, no patch at {patch})')
+    for title, items in (('merged', merged), ('unlanded', kept), ('in the way', blocking)):
+        print(f'{title}:')
+        for item in items or ['none']:
+            print(f'  {item}')
+    return REFUSED if blocking else CLEAR
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog='run-check', description=__doc__.split('\n')[0])
+    sub = p.add_subparsers(dest='verb', required=True)
+    l = sub.add_parser('land', help='is this exact pull request head clear to merge')
+    l.add_argument('--repo', required=True)
+    l.add_argument('--pr', required=True, type=int)
+    l.add_argument('--head', required=True)
+    l.add_argument('--signed-off')
+    r = sub.add_parser('reap', help='remove the worktrees whose pull request merged')
+    r.add_argument('--root', required=True)
+    r.add_argument('--apply', action='store_true')
+    c = sub.add_parser('close', help='is the run ready to close out')
+    c.add_argument('--root', required=True)
+    c.add_argument('--run', required=True)
+    c.add_argument('--repo', action='append')
+    c.add_argument('--prefix')
+    a = p.parse_args(argv)
+    if a.verb == 'land' and not re.fullmatch(r'[0-9a-f]{40}', a.head):
+        p.error('--head must be a full 40-character commit SHA')
+    try:
+        return {'land': land, 'reap': reap, 'close': close}[a.verb](a)
+    except Fail as e:
+        print(f'run-check: {e}', file=sys.stderr)
+        return ERROR
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -2,6 +2,10 @@
 
 Read by the `loop` skill only. Preparing a run should take minutes, not an hour.
 
+**Own process.** First read `$PROTOCOL_SOURCE/authority/own-process.txt` (one `OWNER/REPO` per line;
+an absent file lists none). If it names this repository's origin, decline: say the repository runs its own
+process and the loop protocol is not used there, and write no file. `loop-lint charter` refuses it too.
+
 1. **Last run.** Read the last closeout's `## Parked` and `## For ratification`; apply the owner's
    answers as charter decisions. Run `<plugin root>/bin/loop-teardown reap --repo <abs repo>`
    (a dry run) and put anything it would remove in the owner prompt.
@@ -56,18 +60,18 @@ Read by the `loop` skill only. Preparing a run should take minutes, not an hour.
    them in `LANE.md`, with the policy's review order, tier rule (the tier can depend on the change, not only the repository), run cap, triage owner and no-verdict rule: which components
    run on a lane's first candidate, which on repair deltas, and which the root runs on the final candidate. Where central rules apply, freeze their source commit, selected rule IDs and
    rendered-content digest in the sanitized intent brief; the local reviewer verifies that context.
-   Never infer hosted rule application from CLI access. Never select a tool from PATH or infer a shared reviewer default. Preserve a
-   repository's declared local pair. Missing or conflicting selection blocks activation.
+   Never infer hosted rule application from CLI access. Never select a tool from PATH or infer a shared reviewer default.
+   Missing or conflicting selection blocks activation.
    Resolve `reviewer:` through the same context/contract, then read only the selected
-   `<plugin root>/protocol/loop/review-profiles/` file named for that profile. `review: local-pair` instead
-   selects that profile with no hosted `reviewer:`; a direct landing also requires `landing-branch:`.
+   `<plugin root>/protocol/loop/review-profiles/` file named for that profile, and a profile it names.
    Record exact repository, branch, live rules and command/key availability. Never waive required
    hosted approval or infer main/deploy authority. Run `loop-lint loopmd <abs LOOP.md>`; lint
    acceptance validates syntax, not proof or authorization to activate a hosted reviewer.
    For `pr`, grant pushing landing branches, opening PRs and `gh pr merge --squash --match-head-commit`
    in the charter; name the profile, merge gate and required checks (including `ai-review` where
    required). On `claude`, copy those grants into the launch. Record the selected profile's live
-   activation proof and grant only its evidenced request/thread actions. Missing proof parks
+   activation proof; its request and thread actions are standing (contract section 9), never
+   granted in the charter or a Standing file. Missing proof parks
    activation; never invent check/status names or relax approval. Keep section 5's local review
    where the policy has one.
 6. **Write the files** (contract section 1): the charter, with `protocol: v4` (and `loop-land: off` only on

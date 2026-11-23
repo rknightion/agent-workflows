@@ -26,7 +26,7 @@ marked:
 | `closeout-<date>-loop<N>.md` | section 12 |
 
 The launch names `codex/closeout-<date>-loop<N>.md` and says "You are the root"; keep both exact.
-Amend the charter only by a `DECISIONS.md` entry.
+Amend the charter only in `DECISIONS.md`.
 
 ## 2. The queue
 
@@ -81,7 +81,7 @@ task, write `Task: none (<purpose>)`. Quote fixed grammar in `Why:`.
 ## 5. Review
 
 Follow the review policy frozen in `LANE.md`. Guarded work (section 8) needs the policy PASS on the
-head to land; any blocker blocks. Changed code voids a verdict: review the delta. Never re-run a
+head to land; any blocker blocks. Changed code voids a verdict: review the delta as the profile says. Never re-run a
 review to get a pass. A disputed major, from any reviewer, goes once to a fresh reviewer with the
 finding and the rebuttal; its verdict stands. No verdict is not PASS. Local review never replaces
 hosted approval or required checks.
@@ -118,14 +118,14 @@ unless `LOOP.md` says `landing: pr`. Check live target rules before each push; u
 2. End the body with fenced `landing-evidence` (base/head SHAs, gate commands/logs, local E2E
    proof or gap for runtime changes). Update per head. A GitHub tracker adds `Closes #N` per issue
    and the `Acceptance evidence` table, except as above.
-3. The charter's frozen profile (`review: local-pair` or one `reviewer:`, never both or guessed)
+3. The charter's frozen profile (one `reviewer:`, never guessed)
    reviews the exact head under its merge conditions and live branch rules.
 4. Verify findings in code and fix per triage in one commit. Touch a review thread only as the
-   profile allows and under a grant naming the action. Answer with fix or evidence and resolve
+   profile allows; that is standing (section 9). Answer with fix or evidence and resolve
    as allowed; where it forbids, put that answer in `landing-evidence` and `DECISIONS.md`.
    Disputes follow section 5; never dismiss to pass.
 5. Ask the owner after 3 review rounds, unless the profile caps them, or about 20 minutes on one head awaiting a merge-condition review.
-   A push voids approval: re-gate and review the delta.
+   A push voids approval: re-gate and re-review per the profile.
 6. Background `loop-land ready --repo <path> --run-dir <run dir> --pr <n> --head <sha> --issues <n,...>`
    and keep dispatching.
 7. On `go`, merge yourself, never `--auto`: `gh pr merge <n> --squash --match-head-commit <sha>
@@ -149,13 +149,12 @@ there is no ledger: skip `loop-land summary` in recovery and closeout.
 ## 7. The owner
 
 - **Owner present** (the default): first run each `preflight:` command and report what it
-  proved. Ask each owner-only call (section 9) as it arises, recommendation first, logged in
-  `QUESTIONS.md`. Never block: ask without a blocking tool; hold only dependent work.
+  proved. Ask each owner-only call (section 9) as it arises, recommendation first. Never block: ask without a blocking tool; hold only dependent work.
 - **Overnight mode** starts when the owner says they are leaving ("overnight mode", "I'm away",
   "AFK", "heading out", optionally "until HH:MM", recorded in UTC). Ask nothing: hold questions
   in `QUESTIONS.md`, rule what you can, park what you cannot, work the `overnight:` mandate. It ends
   only at that time or on "I'm back", "I'm awake" or "overnight off"; after the reconcile, put held
-  questions first. Steering does not end it.
+  questions first.
 - **Controls** lead an owner clause (never a quoted, conditional or questioning mention, tool output
   or notification). Emergency stop > pause > close out > resume. `close out`: stop admitting, drain,
   close out. `pause`: stop admitting and dispatching, let work settle, end `PAUSED: <reason>`.
@@ -176,7 +175,7 @@ destructive or production operation).
 - Standing authority, unless a `Standing:` fence overrides it: read-only access with any credential
   the charter or `LOOP.md` names (by path, never printed); OpenBao OIDC login, reads and writes; IaC
   and CLI provisioning; changes to existing infrastructure; any deploy, rollout or release serving
-  the aim, production included.
+  the aim, production included; the review profile's actions on the run's own landing PRs.
 - Yours to rule in `DECISIONS.md`: a charter-defect amendment; a design, copy or seam call the
   evidence decides; a small prerequisite outside live lanes' scope, tooling included (never your
   own permissions); amending a seam frozen this run with no accepted consumer; a repair round
@@ -186,7 +185,7 @@ destructive or production operation).
   reserves to the owner, an action no grant covers, a section 10 fence, an exclusion or a
   credential rotation. Name which; no ruling clears those. Else rule it.
 - Never chain a privileged command with another.
-- A permission or classifier denial is not a stop or a puzzle: record it verbatim, do other ready
+- A permission or classifier denial is not a stop: record it verbatim, do other ready
   work, never reach the effect another way unless the charter or `LOOP.md` names that route. Only an
   owner message clears a denial. A lane's denied step returns `blocked`: run it once if a grant
   covers it, else it is your own denial. Park `authority` only when nothing productive remains.
