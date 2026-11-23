@@ -1,4 +1,10 @@
-#!/usr/bin/env python3.15
+#!/bin/sh
+''''unset d
+case "$0" in */*) d=${0%/*} ;; *) d=. ;; esac
+if [ -L "$0" ]; then d=$(/usr/bin/readlink -f -- "$0") && d=${d%/*}; fi
+[ -r "$d/../scripts/py3" ] && exec /bin/sh "$d/../scripts/py3" "$0" "$@"
+echo "wait-until: cannot find scripts/py3 from $d" >&2
+exit 127 # '''
 """wait-until: a bounded wait that cannot hang silently.
 
     wait-until --timeout <duration> --what "<description>" [--every <seconds>] -- <test command>

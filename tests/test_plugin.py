@@ -79,8 +79,93 @@ class Programs(unittest.TestCase):
         self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
         self.assertIn("TIMED OUT", result.stderr)
 
-    def test_wait_until_has_a_portable_interpreter_line(self):
-        self.assertEqual(read(BIN, "wait-until").splitlines()[0], "#!/usr/bin/env python3.15")
+    def test_wait_until_starts_from_sh(self):
+        self.assertEqual(read(BIN, "wait-until").splitlines()[0], "#!/bin/sh")
+
+
+class WaitUntilStart(unittest.TestCase):
+    """wait-until run directly on a host whose PATH has no python3.15, in a private copy of the plugin layout."""
+
+    HOMEBREW = ("/opt/homebrew/bin/python3.15", "/home/linuxbrew/.linuxbrew/bin/python3.15")
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = tmp.name
+        self.path = os.path.join(self.root, "path")
+        os.makedirs(self.path)
+        self.brew = os.path.join(self.root, "brew", "python3.15")
+        launcher = read(PLUGIN, "scripts", "py3")
+        for candidate in self.HOMEBREW:
+            self.assertIn(candidate, launcher)
+        launcher = launcher.replace(self.HOMEBREW[0], self.brew).replace(self.HOMEBREW[1], self.brew + "-absent")
+        self.write("plugin/scripts/py3", launcher)
+        self.program = self.write("plugin/bin/wait-until", read(BIN, "wait-until"))
+
+    def write(self, rel, text):
+        path = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(path, 0o755)
+        return path
+
+    def python_at(self, rel):
+        return self.write(rel, f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+
+    def run_it(self, *test_command, program=None, path=None):
+        return subprocess.run([program or self.program, "--timeout", "2s", "--every", "0.2", "--what", "a b", "--",
+                               *test_command], cwd=self.root, capture_output=True, text=True, timeout=30,
+                              env={"PATH": path or self.path})
+
+    def assert_exit_codes_are_exact(self):
+        for script, code in (("exit 0", 0), ("exit 2", 3)):
+            with self.subTest(script=script):
+                result = self.run_it("/bin/sh", "-c", script)
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+
+    def test_python_reachable_only_through_homebrew(self):
+        self.python_at("brew/python3.15")
+        self.assert_exit_codes_are_exact()
+
+    def test_python_reachable_only_through_uv(self):
+        managed = self.python_at("managed/bin/python3.15")
+        self.write("path/uv", f"#!/bin/sh\nprintf '%s\\n' '{managed}'\n")
+        self.assert_exit_codes_are_exact()
+
+    def test_a_timeout_still_exits_124(self):
+        self.python_at("brew/python3.15")
+        result = subprocess.run([self.program, "--timeout", "1s", "--every", "0.2", "--what", "x", "--", "/bin/sh", "-c",
+                                 "exit 1"], cwd=self.root, capture_output=True, text=True, timeout=30,
+                                env={"PATH": self.path})
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+
+    def test_a_symlink_to_it_still_finds_the_launcher(self):
+        self.python_at("brew/python3.15")
+        link = os.path.join(self.root, "elsewhere", "wait-until")
+        os.makedirs(os.path.dirname(link))
+        os.symlink(self.program, link)
+        result = self.run_it("/bin/sh", "-c", "exit 0", program=link)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_dot_in_path_never_runs_a_program_from_the_callers_directory(self):
+        self.python_at("brew/python3.15")
+        marker = os.path.join(self.root, "marker")
+        for name in ("sh", "readlink", "python3.15", "uv"):
+            self.write(name, f'#!/bin/sh\n: > "{marker}"\nexit 9\n')
+        link = os.path.join(self.root, "elsewhere", "wait-until")
+        os.makedirs(os.path.dirname(link))
+        os.symlink(self.program, link)
+        for program in (self.program, link):
+            with self.subTest(program=program):
+                result = self.run_it("/bin/sh", "-c", "exit 0", program=program, path=f".:{self.path}")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(os.path.exists(marker))
+
+    def test_no_python_fails_with_how_to_get_it(self):
+        result = self.run_it("/bin/sh", "-c", "exit 0")
+        self.assertEqual(result.returncode, 127, result.stdout + result.stderr)
+        self.assertIn("python@3.15", result.stderr)
 
 
 class LoopSkill(unittest.TestCase):
