@@ -2,18 +2,13 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Agent|Task",
+        "matcher": "AskUserQuestion",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/brief_header.py\"",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/py3\" --hook \"${CLAUDE_PLUGIN_ROOT}/scripts/run_gate.py\" ask || exit 1",
             "timeout": 30
-          }
-        ]
-      },
-      {
-        "matcher": "AskUserQuestion",
-        "hooks": [
+          },
           {
             "type": "command",
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/tmux_title_state.sh\" waiting",
@@ -28,7 +23,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lane_return.py\"",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/py3\" --hook \"${CLAUDE_PLUGIN_ROOT}/scripts/lane_return.py\" || exit 1",
             "timeout": 30
           }
         ]
@@ -39,7 +34,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/fanout_continue.py\"",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/py3\" --hook \"${CLAUDE_PLUGIN_ROOT}/scripts/run_gate.py\" stop || exit 1",
             "timeout": 30
           }
         ]

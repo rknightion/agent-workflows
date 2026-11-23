@@ -25,7 +25,7 @@ sends anything.
 
 ## Requirements
 
-- Python 3.12 or later, and git.
+- Python 3.15 or later, and git.
 - `rg` (ripgrep) is used for the `grep` tool when it is installed; otherwise `grep -rE`.
 - A Cloudflare AI Gateway with a DeepSeek provider key stored in it, or an OpenRouter API key
   (see below).
@@ -41,7 +41,7 @@ export DSREVIEW_CF_ACCOUNT_ID=your-account-id
 export DSREVIEW_CF_GATEWAY=reviews
 export DSREVIEW_TOKEN_FILE="$HOME/.config/dsreview/token"
 export DSREVIEW_ALLOWED_OWNERS=your-github-user,your-org
-exec python3 /path/to/plugin/tools/dsreview/dsreview.py "$@"
+exec python3.15 /path/to/plugin/tools/dsreview/dsreview.py "$@"
 ```
 
 Copy `dsreview.py` and `system.md` somewhere stable instead if you prefer: the script reads

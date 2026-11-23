@@ -1,13 +1,13 @@
-"""Resolve the actual plugin manifest/hook registry, then invoke the lane-return hook over Claude JSON/stdin.
+"""Resolve the actual plugin manifest and hook registry, then invoke the lane-return hook over Claude JSON on stdin.
 
-The same file runs from the public tree's tests/ directory; no provider or live session is used.
+The hook never blocks a lane over the shape of its return. It reads the status line, a branch and a commit
+from the text and appends them to a record. The same file runs from the public tree's tests/ directory;
+no provider or live session is used.
 """
 
-import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import tempfile
 import unittest
@@ -16,6 +16,25 @@ HERE = Path(__file__).resolve().parent
 PLUGIN = HERE.parent if (HERE.parent / "agents").is_dir() else HERE.parent / "plugins/agent-workflows"
 ROLES = ("worker", "composer", "senior", "senior-escalation", "reviewer", "scout")
 SCRIPT = "scripts/lane_return.py"
+SHA = "0123456789abcdef0123456789abcdef01234567"
+
+# A v5 return as a worker writes it.
+GOOD = (
+    "Status: complete\n\n"
+    "Outcome: the parser accepts empty input. Branch v5/parser-empty, commit " + SHA + ".\n"
+    "Evidence: python3 -m unittest tests.test_parser: failed before (1 failure), OK after.\n"
+    "Blockers and left out: none.\n"
+    "Decisions: an empty file parses to an empty list, because the caller already handles one.\n"
+)
+# Returns that the v4 validator sent back. None of them may be blocked now.
+OLD_REJECTS = {
+    "no status line": "I fixed the parser on branch fix/parser and committed abc1234.",
+    "v4 fenced block, bad hash": '```lane-return\n{"v":3,"status":"complete","patch_sha256":"zz"}\n```\n',
+    "two status lines": "Status: partial\nStatus: complete\n",
+    "relative paths everywhere": "Status: blocked\nSee ./return.md and ../x.patch.\n",
+    "empty": "",
+    "huge": "Status: complete\n" + "x" * 200000,
+}
 
 
 def registry():
@@ -27,15 +46,7 @@ class LaneReturnHook(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.patch = Path(self.tmp.name) / "candidate.patch"
-        self.patch.write_bytes(b"fixture candidate\n")
-        self.good = {
-            "v": 3, "lane": "L1", "task": "none", "status": "complete",
-            "base": "a" * 40, "worktree": self.tmp.name,
-            "patch": str(self.patch), "patch_sha256": hashlib.sha256(self.patch.read_bytes()).hexdigest(),
-            "check": "python3 -m unittest", "exit": 0, "tail": "OK",
-            "dsreview": None, "questions": [],
-        }
+        self.state = Path(self.tmp.name) / "state"
 
     def registered_command(self):
         path = registry()
@@ -45,176 +56,100 @@ class LaneReturnHook(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         hook = commands[0]
         self.assertEqual(hook["type"], "command")
-        self.assertNotIn("async", hook)
         return hook["command"]
 
+    def run_raw(self, stdin):
+        return subprocess.run(self.registered_command(), shell=True, input=stdin, text=True,
+                              capture_output=True, timeout=10,
+                              env={**os.environ, "CLAUDE_PLUGIN_ROOT": str(PLUGIN),
+                                   "AGENT_LOOPS_STATE_DIR": str(self.state)})
+
     def run_hook(self, payload):
-        result = subprocess.run(self.registered_command(), shell=True, input=json.dumps(payload), text=True,
-                                capture_output=True, timeout=10,
-                                env={**os.environ, "CLAUDE_PLUGIN_ROOT": str(PLUGIN)})
+        result = self.run_raw(json.dumps(payload))
         self.assertEqual(result.returncode, 0, result.stderr)
-        return json.loads(result.stdout) if result.stdout.strip() else {}
+        # Nothing on stdout: no decision, so the lane's stop always goes through.
+        self.assertEqual(result.stdout.strip(), "", result.stdout)
+        return result
 
-    def hook(self, role, event, payload):
-        return self.run_hook({"hook_event_name": event, "agent_id": "fixture-lane-1",
-                              "agent_type": "agent-workflows:" + role, **payload})
+    def lane(self, message, role="worker", **extra):
+        payload = {"hook_event_name": "SubagentStop", "session_id": "root-1", "agent_id": "lane-1",
+                   "agent_type": "agent-workflows:" + role, "stop_hook_active": False,
+                   "transcript_path": os.path.join(self.tmp.name, "root.jsonl"),
+                   "agent_transcript_path": os.path.join(self.tmp.name, "lane.jsonl"),
+                   "last_assistant_message": message}
+        payload.update(extra)
+        return self.run_hook(payload)
 
-    def stop(self, value, role="worker", event="SubagentStop", **extra):
-        message = value if isinstance(value, str) else "```lane-return\n" + json.dumps(value) + "\n```"
-        return self.hook(role, event, {"last_assistant_message": message, **extra})
+    def records(self, session="root-1"):
+        path = self.state / "lane-returns" / (session + ".jsonl")
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
-    def assertBlocked(self, result, reason):
-        self.assertEqual(result.get("decision"), "block", result)
-        self.assertIn(reason, result["reason"])
+    def test_registered_for_exactly_the_six_roles(self):
+        entries = json.loads(registry().read_text())["hooks"]["SubagentStop"]
+        (entry,) = [e for e in entries if any(SCRIPT in h["command"] for h in e["hooks"])]
+        self.assertEqual(entry["matcher"], "^agent-workflows:(" + "|".join(ROLES) + ")$")
 
-    def test_every_role_rejects_absent_malformed_and_missing_fields(self):
+    def test_a_v5_return_is_recorded_with_status_branch_and_commit(self):
+        self.lane(GOOD)
+        (record,) = self.records()
+        self.assertEqual((record["status"], record["branch"], record["commit"]),
+                         ("complete", "v5/parser-empty", SHA))
+        self.assertEqual((record["agent_id"], record["agent_type"]), ("lane-1", "agent-workflows:worker"))
+        self.assertIn("at", record)
+
+    def test_status_line_forms(self):
+        for message, status in (("**Status:** partial\nrest", "partial"), ("status: BLOCKED on creds", "blocked"),
+                                ("Outcome first\nStatus: failed\n", "failed"),
+                                ("  Status:   complete  ", "complete")):
+            with self.subTest(message=message):
+                self.lane(message)
+                self.assertEqual(self.records()[-1]["status"], status)
+
+    def test_short_commit_and_branch_forms(self):
+        self.lane("Status: complete\nCommitted abc1234 on branch `fix/one`.")
+        record = self.records()[-1]
+        self.assertEqual((record["branch"], record["commit"]), ("fix/one", "abc1234"))
+
+    def test_no_status_line_goes_through_and_records_none(self):
+        self.lane("I could not finish; the gate needs credentials.")
+        self.assertIsNone(self.records()[-1]["status"])
+
+    def test_returns_the_v4_validator_rejected_are_never_blocked(self):
         for role in ROLES:
-            for message, reason in (("Done.", "lane-return"),
-                                    ("```lane-return\n{broken}\n```", "JSON"),
-                                    ({k: v for k, v in self.good.items() if k != "check"}, "check")):
-                with self.subTest(role=role, reason=reason):
-                    self.assertBlocked(self.stop(message, role), reason)
+            for name, message in OLD_REJECTS.items():
+                with self.subTest(role=role, case=name):
+                    self.lane(message, role=role)
+        self.assertEqual(len(self.records()), len(ROLES) * len(OLD_REJECTS))
 
-    def test_hash_and_complete_exit_are_checked_even_on_repeated_stops(self):
-        actual = hashlib.sha256(self.patch.read_bytes()).hexdigest()
-        for change, reasons in (({"patch_sha256": "0" * 64}, ("patch_sha256 mismatch", "0" * 64, actual)),
-                                ({"exit": 7}, ("complete conflicts with nonzero check exit 7",)),
-                                ({"patch": str(self.patch) + ".missing"}, ("patch",))):
-            with self.subTest(change=change):
-                result = self.stop({**self.good, **change}, stop_hook_active=True)
-                for reason in reasons:
-                    self.assertBlocked(result, reason)
+    def test_a_repeated_stop_is_never_blocked(self):
+        self.lane("no status", stop_hook_active=True)
 
-    def test_unreadable_patch_reasons_name_the_path(self):
-        missing = str(self.patch) + ".missing"
-        for patch in (self.tmp.name, missing):
-            with self.subTest(patch=patch):
-                self.assertBlocked(self.stop({**self.good, "patch": patch}), patch)
+    def test_a_root_or_an_unrelated_agent_is_a_no_op(self):
+        self.run_hook({"hook_event_name": "Stop", "session_id": "root-1", "last_assistant_message": GOOD})
+        self.run_hook({"hook_event_name": "SubagentStop", "session_id": "root-1", "agent_id": "x",
+                       "agent_type": "general-purpose", "last_assistant_message": GOOD})
+        self.run_hook({"hook_event_name": "SubagentStop", "session_id": "root-1", "agent_id": "",
+                       "agent_type": "agent-workflows:worker", "last_assistant_message": GOOD})
+        self.assertEqual(self.records(), [])
 
-    def test_valid_candidate_partial_blocked_read_only_and_committed_returns_pass(self):
-        for role in ROLES:
-            with self.subTest(role=role):
-                self.assertEqual(self.stop(self.good, role), {})
-                for status in ("partial", "blocked", "failed"):
-                    self.assertEqual(self.stop({**self.good, "status": status, "exit": None,
-                                                "patch": None, "patch_sha256": None}, role), {})
-        self.assertEqual(self.stop({**self.good, "patch": None, "patch_sha256": None}, "reviewer"), {})
-        committed = {k: v for k, v in self.good.items() if k not in ("patch", "patch_sha256")}
-        for role in ("composer", "senior", "senior-escalation"):
-            self.assertEqual(self.stop({**committed, "sha": "b" * 40}, role), {})
-        for role in ("worker", "reviewer", "scout"):
-            self.assertBlocked(self.stop({**committed, "sha": "b" * 40}, role), "sha handbacks are only for")
-        crlf = "```lane-return\r\n" + json.dumps(self.good) + "\r\n```\r\nDone.\r\n"
-        self.assertEqual(self.stop(crlf), {})
-        self.assertEqual(self.stop({**self.good, "coderabbit": None}), {})  # a run prepared before the field left
+    def test_malformed_input_never_blocks(self):
+        for stdin in ("", "not json", "[]", '{"agent_type": 5}', '{"last_assistant_message": null}'):
+            with self.subTest(stdin=stdin):
+                result = self.run_raw(stdin)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), "")
 
-    def test_named_review_record_and_legacy_form_are_both_validated(self):
-        candidate = {k: v for k, v in self.good.items() if k != "dsreview"}
-        review = {"provider": "local-agent", "verdict": "PASS", "major": 0,
-                  "fixed": 0, "disputed": 0, "evidence": str(Path(self.tmp.name) / "review.json")}
-        self.assertEqual(self.stop({**candidate, "review": review}), {})
-        self.assertEqual(self.stop({**candidate, "review": None}), {})
-        self.assertBlocked(self.stop(candidate), "exactly one")
-        self.assertBlocked(self.stop({**self.good, "review": review}), "exactly one")
-        for change in ({"provider": ""}, {"evidence": "relative.json"}, {"major": True},
-                       {"verdict": "SKIPPED"}, {"fixed": -1}, {"disputed": None}):
-            with self.subTest(change=change):
-                self.assertBlocked(self.stop({**candidate, "review": {**review, **change}}), "review")
-        for bad in ({"verdict": "PASS", "major": True, "fixed": 0, "disputed": 0}, {}):
-            self.assertBlocked(self.stop({**self.good, "dsreview": bad}), "dsreview")
+    def test_an_unwritable_record_never_blocks(self):
+        self.state.parent.mkdir(parents=True, exist_ok=True)
+        self.state.write_text("a file where the state directory should be")
+        self.lane(GOOD)
 
-    def test_read_only_returns_written_as_their_agent_text_says_pass(self):
-        """A reviewer or scout runs no review route, so its agent text must tell it to return a null
-        review record: a record whose evidence says "the verdict is in this message" is refused."""
-        candidate = {k: v for k, v in self.good.items() if k != "dsreview"}
-        for role in ("reviewer", "scout"):
-            with self.subTest(role=role):
-                text = " ".join((PLUGIN / "agents" / f"{role}.md").read_text(encoding="utf-8").split())
-                self.assertIn('Set `"review":null`: you run no review route', text)
-                self.assertNotIn("says the verdict is in this message", text)
-                as_told = {**candidate, "patch": None, "patch_sha256": None, "review": None}
-                self.assertEqual(self.stop(as_told, role), {})
-                in_message = {"provider": "none", "verdict": "PASS", "major": 0, "fixed": 0, "disputed": 0,
-                              "evidence": "the verdict is in this message"}
-                self.assertBlocked(self.stop({**as_told, "review": in_message}, role),
-                                   "review evidence must be an absolute artifact path")
-
-    def test_optional_tracker_field_is_a_string_or_an_object_and_nothing_else(self):
-        for role in ROLES:
-            for tracker in ("github #4321", {"issue": 4321, "state": "ready"}):
-                with self.subTest(role=role, tracker=tracker):
-                    self.assertEqual(self.stop({**self.good, "tracker": tracker}, role), {})
-        self.assertEqual(self.stop(self.good), {})  # absent stays valid: the field is optional
-        for tracker in (4321, ["4321"], True, None):
-            with self.subTest(tracker=tracker):
-                self.assertBlocked(self.stop({**self.good, "tracker": tracker}), "tracker")
-        # A tracker field does not rescue an otherwise malformed block, and the version stays 3.
-        self.assertBlocked(self.stop({**self.good, "tracker": "github #4321", "v": 4}), "v must be 3")
-        self.assertBlocked(self.stop({k: v for k, v in {**self.good, "tracker": "x"}.items() if k != "check"}),
-                           "check")
-
-    def test_wrong_types_duplicate_keys_and_ambiguous_blocks_are_not_returns(self):
-        for change in ({"exit": False}, {"v": True}, {"questions": "none"}, {"dsreview": {}},
-                       {"patch_sha256": None}, {"status": "done"}):
-            with self.subTest(change=change):
-                self.assertBlocked(self.stop({**self.good, **change}), "lane return")
-        text = "```lane-return\n" + json.dumps(self.good) + "\n```"
-        self.assertBlocked(self.stop(text + "\n" + text), "one")
-        self.assertBlocked(self.stop(text.replace('"v": 3', '"v": 3, "v": 3')), "duplicate")
-
-    def test_oversized_deep_and_invalid_returns_block_instead_of_hook_error(self):
-        for contents, reason in (("[" * 20000 + "0" + "]" * 20000, "size"),
-                                 ('{"extra":' + "[" * 100 + "0" + "]" * 100 + "}", "depth"),
-                                 ('{"extra":"' + "x" * 2000 + '"}', "size"), ("{bad json}", "JSON")):
-            with self.subTest(length=len(contents)):
-                self.assertBlocked(self.stop("```lane-return\n" + contents + "\n```"), reason)
-        self.assertEqual(self.stop({**self.good, "tail": "[" * 100 + '"\\\\'}), {})
-        unicode_return = json.dumps({**self.good, "tail": "\U0001f600" * 750}, ensure_ascii=False)
-        self.assertBlocked(self.stop("```lane-return\n" + unicode_return + "\n```"), "size")
-
-    def test_decode_and_envelope_failures_use_blocking_exit_two(self):
-        for raw in (b"\xff", b"[" * 20000 + b"0" + b"]" * 20000):
-            result = subprocess.run(self.registered_command(), shell=True, input=raw,
-                                    capture_output=True, timeout=10,
-                                    env={**os.environ, "CLAUDE_PLUGIN_ROOT": str(PLUGIN)})
-            self.assertEqual(result.returncode, 2, result.stderr)
-            self.assertIn(b"lane return:", result.stderr)
-
-    def test_plugin_registration_is_supported_and_agent_frontmatter_is_not_used(self):
-        hooks = json.loads(registry().read_text())["hooks"]
-        entries = [e for e in hooks.get("SubagentStop", []) if any(SCRIPT in h["command"] for h in e["hooks"])]
-        self.assertEqual(len(entries), 1)
-        self.assertTrue(all(re.fullmatch(entries[0]["matcher"], "agent-workflows:" + r) for r in ROLES))
-        self.assertFalse(re.fullmatch(entries[0]["matcher"], "agent-workflows:worker-extra"))
-        self.assertFalse(any(SCRIPT in h["command"] for e in hooks.get("Stop", []) for h in e["hooks"]))
-        for role in ROLES:
-            self.assertNotRegex((PLUGIN / "agents" / (role + ".md")).read_text().split("---", 2)[1], r"(?m)^hooks:")
-
-    def test_no_hook_denies_a_lane_command(self):
-        # Owner ruling: the lane no-push rule stays prose; nothing in the plugin inspects lane commands.
-        hooks = json.loads(registry().read_text())["hooks"]
-        for entry in hooks.get("PreToolUse", []):
-            matcher = entry.get("matcher", "")
-            with self.subTest(matcher=matcher):
-                self.assertNotIn(matcher, ("", "*"))
-                self.assertFalse(any(re.fullmatch(matcher, tool) for tool in ("Bash", "Monitor")))
-        self.assertNotIn("lane_guard", registry().read_text())
-        for role in ROLES:
-            self.assertNotRegex((PLUGIN / "agents" / (role + ".md")).read_text().split("---", 2)[1], r"(?m)^hooks:")
-        for tool in ("Bash", "Monitor"):
-            with self.subTest(tool=tool):
-                self.assertEqual(self.hook("worker", "PreToolUse", {"tool_name": tool, "tool_input": {
-                    "command": "git push", "description": "fixture", "timeout_ms": 1000}}), {})
-
-    def test_script_itself_excludes_roots_unrelated_agents_and_empty_type_forks(self):
-        identities = [{"agent_id": ""}, {"agent_id": None}, {"agent_id": True},
-                      {"agent_id": "  "}, {"agent_type": ""}, {"agent_type": None},
-                      {"agent_type": "worker"}, {"agent_type": "other:worker"},
-                      {"agent_type": "agent-workflows:worker-extra"},
-                      {"agent_type": "agent-workflows:worker\\n"}]
-        for identity in identities:
-            with self.subTest(identity=identity):
-                self.assertEqual(self.hook("worker", "SubagentStop", {"last_assistant_message": "Done.", **identity}), {})
+    def test_the_session_id_cannot_escape_the_record_directory(self):
+        self.lane(GOOD, session_id="../../escape")
+        self.assertFalse((Path(self.tmp.name) / "escape.jsonl").exists())
+        self.assertEqual(len(list((self.state / "lane-returns").iterdir())), 1)
 
 
 if __name__ == "__main__":

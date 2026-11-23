@@ -1,194 +1,66 @@
-#!/usr/bin/env python3
-"""SubagentStop hook: send a lane back when its lane-return block does not check out.
+#!/usr/bin/env python3.15
+"""SubagentStop hook: record a run lane's return; never block it.
 
-Plugin-agent frontmatter hooks are ignored by Claude, so the manifest registers this script as a
-global SubagentStop hook. It acts only on a nonempty agent_id with one of six exact qualified
-agent-workflows types; roots, unrelated agents and empty-type forks are no-ops. Repeated stops
-still validate, but Claude's native consecutive-stop-block cap (default 8) can end a lane despite
-later block requests. No transcript scan, command execution or state write occurs. Lane commands
-are never inspected here: lanes' no-push rule stays in the agent definitions.
+A lane's return is plain text whose first line is `Status: complete|partial|blocked|failed`. This hook reads
+that status line, a branch and a commit from the text and appends them, one JSON line per stop, to
+`<state>/lane-returns/<session>.jsonl` (state is `$AGENT_LOOPS_STATE_DIR`, else `~/.local/state/agent-loops`).
+The root reads the return itself and repairs what it needs; the hook never sends a lane back over the
+shape of its return. A return with no status line is recorded with a null status. It acts only on
+the six agent-workflows roles; any fault, malformed input included, lets the stop through.
 """
 
-import hashlib
+import datetime
 import json
 import os
-from pathlib import Path
 import re
-import stat
 import sys
 
-
-BLOCK = re.compile(r"^```lane-return[ \t]*\r?\n(.*?)\r?\n```[ \t]*\r?$", re.M | re.S)
-SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
-HASH = re.compile(r"[0-9a-fA-F]{64}\Z")
-ROLES = {"agent-workflows:" + role: role for role in
+ROLES = {"agent-workflows:" + role for role in
          ("worker", "composer", "senior", "senior-escalation", "reviewer", "scout")}
-MAX_RETURN_UNITS = 1800
-MAX_MESSAGE_CHARS = 65536
-MAX_JSON_DEPTH = 32
-REQUIRED = {"v", "lane", "task", "status", "base", "worktree", "check", "exit", "tail",
-            "questions"}
+STATE_DIR_ENV = "AGENT_LOOPS_STATE_DIR"
+SCAN_CHARS = 65536
+STATUS = re.compile(r"^[\s>*_`#-]*status[*_`]*\s*:[*_`\s]*(complete|partial|blocked|failed)\b", re.I | re.M)
+FULL_SHA = re.compile(r"(?<![0-9a-fA-F])([0-9a-f]{40})(?![0-9a-fA-F])")
+SHORT_SHA = re.compile(r"\bcommit(?:ted)?\b[\s:`*]*(?:as\s+|at\s+)?([0-9a-f]{7,40})\b", re.I)
+SHORT_SHA_BEFORE = re.compile(r"\bcommit(?:ted)?\s+`?([0-9a-f]{7,40})\b", re.I)
+BRANCH = re.compile(r"\bbranch\b[\s:`*]*(?:is\s+|named\s+)?`?([A-Za-z0-9][\w./-]*[\w-])", re.I)
 
 
-def unique_object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key: " + key)
-        result[key] = value
-    return result
+def extract(message):
+    text = message[:SCAN_CHARS] if isinstance(message, str) else ""
+    status = STATUS.search(text)
+    commit = FULL_SHA.search(text) or SHORT_SHA.search(text) or SHORT_SHA_BEFORE.search(text)
+    branch = BRANCH.search(text)
+    return {
+        "status": status.group(1).lower() if status else None,
+        "branch": branch.group(1) if branch else None,
+        "commit": commit.group(1) if commit else None,
+    }
 
 
-def review_ok(value):
-    if value is None:
-        return True
-    if not isinstance(value, dict):
-        return False
-    return (value.get("verdict") in ("PASS", "FAIL", "none")
-            and all(type(value.get(k)) is int and value[k] >= 0 for k in ("major", "fixed", "disputed")))
-
-
-def bounded_json(text, limit):
-    """Bound size and nesting before invoking the recursive decoder; honour JSON string escapes."""
-    if len(text) > limit:
-        raise ValueError("JSON size limit exceeded")
-    depth = 0
-    quoted = escaped = False
-    for char in text:
-        if quoted:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                quoted = False
-        elif char == '"':
-            quoted = True
-        elif char in "[{":
-            depth += 1
-            if depth > MAX_JSON_DEPTH:
-                raise ValueError("JSON depth limit exceeded")
-        elif char in "]}":
-            depth -= 1
-    return json.loads(text, object_pairs_hook=unique_object)
-
-
-def return_error(payload, role):
-    message = payload.get("last_assistant_message")
-    if not isinstance(message, str):
-        return "missing last_assistant_message with a lane-return block"
-    if len(message) > MAX_MESSAGE_CHARS:
-        return "last_assistant_message size limit exceeded"
-    blocks = list(BLOCK.finditer(message))
-    if len(blocks) != 1:
-        return "expected exactly one fenced lane-return JSON block"
-    try:
-        if len(blocks[0].group().encode("utf-16-le")) // 2 > MAX_RETURN_UNITS:
-            return "lane-return size limit exceeded (1800 UTF-16 units including fences)"
-        value = bounded_json(blocks[0].group(1), MAX_RETURN_UNITS)
-    except (ValueError, RecursionError, UnicodeError) as exc:
-        return "invalid lane-return JSON: " + str(exc)
-    if not isinstance(value, dict):
-        return "lane-return JSON must be an object"
-    missing = REQUIRED - value.keys()
-    if missing:
-        return "missing required fields: " + ", ".join(sorted(missing))
-    if type(value["v"]) is not int or value["v"] != 3:
-        return "v must be 3"
-    for key in ("lane", "task", "base", "worktree"):
-        if not isinstance(value[key], str) or not value[key].strip():
-            return key + " must be a nonempty string"
-    if not SHA.fullmatch(value["base"]):
-        return "base must be a full commit SHA"
-    if not Path(value["worktree"]).is_absolute():
-        return "worktree must be absolute"
-    if value["status"] not in ("complete", "partial", "blocked", "failed"):
-        return "invalid status"
-    for key in ("check", "tail"):
-        if not isinstance(value[key], str):
-            return key + " must be a string"
-    if value["exit"] is not None and type(value["exit"]) is not int:
-        return "exit must be an integer or null"
-    if value["status"] == "complete" and value["exit"] not in (None, 0):
-        return "status complete conflicts with nonzero check exit " + str(value["exit"])
-    if not isinstance(value["questions"], list) or not all(isinstance(q, str) for q in value["questions"]):
-        return "questions must be an array of strings"
-    # Optional (still version 3): the design does not fix its shape, so a string or an object.
-    if "tracker" in value and not isinstance(value["tracker"], (str, dict)):
-        return "tracker must be a string or an object"
-    review_keys = {"review", "dsreview"} & value.keys()
-    if len(review_keys) != 1:
-        return "supply exactly one of review or legacy dsreview"
-    review_key = next(iter(review_keys))
-    review = value[review_key]
-    if not review_ok(review):
-        return "invalid " + review_key + " review fields"
-    if review_key == "review" and review is not None:
-        if not isinstance(review.get("provider"), str) or not review["provider"].strip():
-            return "review provider must name the frozen route"
-        if not isinstance(review.get("evidence"), str) or not Path(review["evidence"]).is_absolute():
-            return "review evidence must be an absolute artifact path"
-    if "sha" in value:
-        if role not in ("composer", "senior", "senior-escalation"):
-            return "sha handbacks are only for composer, senior and senior-escalation compose/board lanes"
-        if "patch" in value or "patch_sha256" in value:
-            return "sha replaces patch and patch_sha256; do not supply both forms"
-        if not isinstance(value["sha"], str) or not SHA.fullmatch(value["sha"]):
-            return "sha must be a full commit SHA"
-        return None
-    missing = {"patch", "patch_sha256"} - value.keys()
-    if missing:
-        return "missing required fields: " + ", ".join(sorted(missing))
-    patch, expected = value["patch"], value["patch_sha256"]
-    if patch is None and expected is None:
-        if value["status"] == "complete" and role not in ("reviewer", "scout"):
-            return "complete implementation needs a patch and patch_sha256 (or composer or senior sha)"
-        return None
-    if not isinstance(patch, str) or not Path(patch).is_absolute():
-        return "patch must be an absolute file path (or null with a null hash)"
-    if not isinstance(expected, str) or not HASH.fullmatch(expected):
-        return "patch_sha256 must be a 64-digit hex hash"
-    try:
-        # Nonblocking open + regular-file check prevents a named pipe/device from hanging the hook.
-        fd = os.open(patch, os.O_RDONLY | os.O_NONBLOCK)
-    except OSError as exc:
-        return "cannot read patch " + patch + ": " + (exc.strerror or str(exc))
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return "patch must name a regular file: " + patch
-        digest = hashlib.sha256()
-        for chunk in iter(lambda: os.read(fd, 65536), b""):
-            digest.update(chunk)
-        actual = digest.hexdigest()
-    except OSError as exc:
-        return "cannot read patch " + patch + ": " + (exc.strerror or str(exc))
-    finally:
-        os.close(fd)
-    if actual != expected.lower():
-        return "patch_sha256 mismatch: expected " + expected + ", actual " + actual
-    return None
+def record(payload):
+    agent_id, agent_type = payload.get("agent_id"), payload.get("agent_type")
+    if not isinstance(agent_id, str) or not agent_id.strip() or agent_type not in ROLES:
+        return
+    if payload.get("hook_event_name") not in (None, "SubagentStop"):
+        return
+    entry = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds"),
+             "agent_id": agent_id, "agent_type": agent_type, **extract(payload.get("last_assistant_message"))}
+    session = re.sub(r"[^\w.-]", "_", str(payload.get("session_id") or "unknown")).lstrip(".") or "unknown"
+    base = os.environ.get(STATE_DIR_ENV) or os.path.expanduser("~/.local/state/agent-loops")
+    directory = os.path.join(base, "lane-returns")
+    os.makedirs(directory, exist_ok=True)
+    with open(os.path.join(directory, session + ".jsonl"), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry) + "\n")
 
 
 def main():
     try:
-        # A malformed/decode-failing envelope cannot establish identity: fail closed with exit 2,
-        # never the nonblocking exit 1. Valid unrelated/root envelopes are no-ops before validation.
-        payload = json.load(sys.stdin.buffer)
-        if not isinstance(payload, dict):
-            raise ValueError("hook input must be an object")
-        agent_id, agent_type = payload.get("agent_id"), payload.get("agent_type")
-        if (not isinstance(agent_id, str) or not agent_id.strip()
-                or not isinstance(agent_type, str) or agent_type not in ROLES):
-            return 0
-        if payload.get("hook_event_name") != "SubagentStop":
-            return 0
-        reason = return_error(payload, ROLES[agent_type])
-        if reason:
-            json.dump({"decision": "block", "reason": "lane return: " + reason +
-                       ". Repair the return and stop again; preserve an honest partial/blocked status."}, sys.stdout)
-    except (ValueError, OSError, TypeError, RecursionError, UnicodeError) as exc:
+        payload = json.load(sys.stdin)
+        if isinstance(payload, dict):
+            record(payload)
+    except Exception as exc:  # a record is never worth a blocked lane
         print("lane return: " + str(exc), file=sys.stderr)
-        return 2
     return 0
 
 
