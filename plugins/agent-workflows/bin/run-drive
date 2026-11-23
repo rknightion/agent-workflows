@@ -1,0 +1,569 @@
+#!/usr/bin/env python3
+"""run-drive: the mechanical part of landing a run's pull requests, one pass per call.
+
+  run-drive open  --run <dir> --lane <id> --worktree <dir> --body <PR.md> --review "Review: ..."
+                  [--reviewer codex|bugbot]... [--base <branch>] [--json]
+  run-drive sweep --run <dir> [--signed-off <lane>=<who and why>]... [--json]
+  run-drive answer --run <dir> --lane <id> --match <regex> --reply <text> [--json]
+  run-drive repair-pushed --run <dir> --lane <id> [--json]
+
+State is <run>/state.json; everything else is read live from git and gh on every call. Each verb
+does one pass and exits 0, or 2 on a usage or tool error; it never sleeps or waits. It never
+merges: sweep enables auto-merge with --match-head-commit only when every reviewer the head needs
+has a verdict on that exact head, no review thread is unresolved, no check is failing, and
+run-check land exits clear.
+"""
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+CODEX_BOT = 'chatgpt-codex-connector[bot]'
+BOTS = {'codex': CODEX_BOT, 'bugbot': 'cursor[bot]'}
+CODEX_SILENT_S, BUGBOT_START_S, VERDICT_LIMIT_S = 10 * 60, 7 * 60, 20 * 60
+BUGBOT_CHECK = 'Cursor Bugbot'
+BUGBOT_API = 'https://api.cursor.com/bugbot/review'
+NO_VERDICT = re.compile(r'skipp(ed|ing)|\bdisabled\b|\bpaused\b|\berrored\b|encountered an error|quota|'
+                        r'(spend|usage) limit|oversized', re.I)
+RUN_CHECK = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'run-check')
+THREADS_Q = ('query($owner:String!,$name:String!,$pr:Int!,$after:String){repository(owner:$owner,name:$name)'
+             '{pullRequest(number:$pr){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}'
+             'nodes{id isResolved path line comments(first:20){nodes{databaseId author{login} body}}}}}}}')
+RESOLVE_Q = 'mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}'
+
+
+class Fail(Exception):
+    """A usage or tool error: exit 2."""
+
+
+def now():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def iso(t):
+    return t.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def when(s):
+    return dt.datetime.fromisoformat(s.replace('Z', '+00:00')) if s else dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+
+
+def age(s):
+    return (now() - when(s)).total_seconds()
+
+
+def run(cmd, cwd=None, check=True, stdin=None):
+    try:
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, input=stdin)
+    except OSError as e:
+        raise Fail(f'{cmd[0]}: {e}')
+    if check and r.returncode != 0:
+        raise Fail(f'{" ".join(cmd[:3])} failed: {(r.stderr or r.stdout).strip()[:300]}')
+    return r
+
+
+def gh(*args, cwd=None):
+    """Every JSON value gh printed (gh api --paginate prints one per page, back to back)."""
+    text, dec, out, i = run(['gh', *args], cwd=cwd).stdout.strip(), json.JSONDecoder(), [], 0
+    try:
+        while i < len(text):
+            v, i = dec.raw_decode(text, i)
+            out.append(v)
+            while i < len(text) and text[i].isspace():
+                i += 1
+    except ValueError:
+        raise Fail(f'gh {" ".join(args[:2])} returned invalid JSON')
+    return out
+
+
+def gh_one(*args, cwd=None):
+    v = gh(*args, cwd=cwd)
+    if len(v) != 1:
+        raise Fail(f'gh {" ".join(args[:2])} returned {len(v)} values, expected one')
+    return v[0]
+
+
+def gh_items(path):
+    items = []
+    for page in gh('api', '--paginate', path):
+        items += page if isinstance(page, list) else page.get('check_runs', [])
+    return items
+
+
+def login(x):
+    return ((x or {}).get('user') or (x or {}).get('author') or {}).get('login', '')
+
+
+class State:
+    """<run>/state.json, held under an exclusive lock for one call and replaced atomically."""
+
+    def __init__(self, run_dir):
+        run_dir = os.path.abspath(run_dir)
+        if not os.path.isdir(run_dir):
+            raise Fail(f'no such run folder: {run_dir}')
+        self.path = os.path.join(run_dir, 'state.json')
+        self.lock = open(self.path + '.lock', 'w')
+        try:
+            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Fail(f'another run-drive call holds {self.path}.lock')
+        try:
+            self.data = json.load(open(self.path)) if os.path.exists(self.path) else {'version': 1, 'prs': {}}
+        except ValueError:
+            raise Fail(f'{self.path} is not valid JSON')
+
+    def lane(self, lane):
+        e = self.data['prs'].get(lane)
+        if not e:
+            raise Fail(f'no pull request recorded for lane {lane}')
+        return e
+
+    def save(self):
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(self.path), prefix='.state.', suffix='.tmp')
+        with os.fdopen(fd, 'w') as f:
+            json.dump(self.data, f, indent=2, sort_keys=True)
+            f.write('\n')
+        os.replace(tmp, self.path)
+
+
+def asks(e, reviewer, head):
+    return [a for a in e['asks'] if a['reviewer'] == reviewer and a['head'] == head]
+
+
+def key_path():
+    root = os.environ.get('CREDENTIALS_DIR') or os.path.expanduser('~/.config/agent-workflows/credentials')
+    return os.path.join(root, 'cursor', 'team_admin_key')
+
+
+def ask_bugbot(e):
+    """One Bugbot request; None when the key is unavailable. The key goes to curl on stdin only."""
+    try:
+        key = open(key_path()).read().strip()
+    except OSError:
+        return None
+    if not key:
+        return None
+    hide = lambda s: s.replace(key, '<redacted>')[:300]
+    cfg = 'user = "%s:"\n' % key.replace('\\', '\\\\').replace('"', '\\"')
+    r = run(['curl', '-sS', '-K', '-', '-X', 'POST', BUGBOT_API, '-H', 'Content-Type: application/json',
+             '-d', json.dumps({'prUrl': e['url']}), '-w', '\n%{http_code}'], check=False, stdin=cfg)
+    body, _, code = r.stdout.rpartition('\n')
+    code = int(code) if code.strip().isdigit() else 0
+    try:
+        resp = json.loads(body)
+    except ValueError:
+        resp = {}
+    if 200 <= code < 300 and isinstance(resp, dict) and resp.get('outcome') == 'success':
+        return {'via': 'api', 'outcome': 'requested', 'request_id': resp.get('request_id')}
+    if code in (401, 403):
+        run(['gh', 'pr', 'comment', str(e['pr']), '-R', e['repo'], '--body', 'bugbot run'])
+        return {'via': 'comment', 'outcome': f'api answered {code}; asked by comment'}
+    if code == 400:
+        return {'via': 'api', 'outcome': 'refused: ' + hide(body)}
+    return {'via': 'api', 'outcome': f'uncertain ({code or "no response"}): ' + hide(body or r.stderr)}
+
+
+def ask(e, reviewer, head, notes):
+    """Ask once a head: a reviewer already asked for this head is never asked again."""
+    if asks(e, reviewer, head):
+        return None
+    rec = {'reviewer': reviewer, 'head': head, 'at': iso(now())}
+    if reviewer == 'codex':
+        out = run(['gh', 'pr', 'comment', str(e['pr']), '-R', e['repo'], '--body', '@codex review']).stdout
+        m = re.search(r'#issuecomment-(\d+)', out)
+        rec.update(via='comment', comment_id=int(m.group(1)) if m else None, outcome='requested')
+    else:
+        res = ask_bugbot(e)
+        if res is None:
+            notes.append(f'bugbot unavailable: no key at {key_path()}')
+            return None
+        rec.update(res)
+    e['asks'].append(rec)
+    notes.append(f'asked {reviewer} for {head[:10]}: {rec["outcome"]}')
+    return rec
+
+
+def codex_read(e, head):
+    """Codex's verdict on head ('clear', 'findings' or None) and whether it answered since asked."""
+    comments = [c for c in gh_items(f'repos/{e["repo"]}/issues/{e["pr"]}/comments?per_page=100') if login(c) == CODEX_BOT]
+    reviews = [r for r in gh_items(f'repos/{e["repo"]}/pulls/{e["pr"]}/reviews?per_page=100') if login(r) == CODEX_BOT]
+    done = None
+    for c in comments:
+        m = re.search(r'codex-review-state:v1 (\{.*?\})\s*-->', c.get('body') or '', re.S)
+        try:
+            cr = json.loads(m.group(1)).get('code_review') or {} if m else {}
+        except ValueError:
+            cr = {}
+        if cr.get('commit_sha') == head and cr.get('status') == 'completed':
+            done = cr
+    verdict = None
+    if done:
+        if done.get('has_any_findings') or any(r.get('commit_id') == head for r in reviews):
+            verdict = 'findings'
+        elif any('codex-review-receipt:v1' in (c.get('body') or '') and re.search(r"Didn.t find any major issues", c['body'])
+                 and (m := re.search(r'Reviewed commit:\**\s*`([0-9a-f]{7,40})`', c['body'])) and head.startswith(m.group(1))
+                 for c in comments):
+            verdict = 'clear'
+    a = (asks(e, 'codex', head) or [None])[-1]
+    answered, refused = False, None
+    if a:
+        t = when(a['at'])
+        for c in comments:
+            if when(c.get('updated_at') or c.get('created_at')) >= t:
+                answered = True
+                body = c.get('body') or ''
+                if when(c.get('created_at')) >= t and 'codex-review-state:v1' not in body and 'codex-review-receipt:v1' not in body:
+                    refused = re.sub(r'\s+', ' ', body)[:200]
+        answered = answered or any(when(r.get('submitted_at')) >= t for r in reviews)
+        if not answered and a.get('comment_id'):
+            reacts = gh_items(f'repos/{e["repo"]}/issues/comments/{a["comment_id"]}/reactions')
+            answered = any(login(r) == CODEX_BOT for r in reacts)
+    return verdict, answered, refused
+
+
+def bugbot_runs(e, head):
+    """Every check run on head named like Bugbot's, from any app."""
+    return [r for r in gh_items(f'repos/{e["repo"]}/commits/{head}/check-runs?filter=all&per_page=100')
+            if r.get('name') == BUGBOT_CHECK]
+
+
+def bugbot_read(e, head):
+    runs = [r for r in bugbot_runs(e, head) if (r.get('app') or {}).get('slug') == 'cursor']
+    if not runs:
+        return None, 'no run'
+    waiting = [r for r in runs if r.get('status') != 'completed']
+    if waiting:  # a queued or running review on the head (started_at may still be null): no verdict yet
+        return None, waiting[0].get('status')
+    last = max(runs, key=lambda r: r.get('started_at') or r.get('completed_at') or '')
+    out = last.get('output') or {}
+    text = f'{out.get("title") or ""} {out.get("summary") or ""}'
+    if NO_VERDICT.search(text):
+        return None, f'{last.get("conclusion")}, no verdict: ' + re.sub(r'\s+', ' ', text).strip()[:160]
+    return {'success': 'clear', 'neutral': 'findings', 'failure': 'findings'}.get(last.get('conclusion')), last.get('conclusion')
+
+
+def threads(e):
+    owner, name = e['repo'].split('/', 1)
+    out, after = [], None
+    while True:
+        args = ['api', 'graphql', '-f', f'query={THREADS_Q}', '-f', f'owner={owner}', '-f', f'name={name}', '-F', f'pr={e["pr"]}']
+        page = gh_one(*args, *(['-f', f'after={after}'] if after else []))['data']['repository']['pullRequest']['reviewThreads']
+        out += page['nodes']
+        if not page['pageInfo']['hasNextPage']:
+            return out
+        after = page['pageInfo']['endCursor']
+
+
+def thread_body(t):
+    c = (t['comments']['nodes'] or [{}])[0]
+    body = re.sub(r'<!--.*?-->|<details>.*?</details>', '', c.get('body') or '', flags=re.S)
+    return re.sub(r'\s+', ' ', body).strip()[:400]
+
+
+def thread_text(t):
+    c = (t['comments']['nodes'] or [{}])[0]
+    return f'{login(c)} {t.get("path")}:{t.get("line")}: ' + thread_body(t)
+
+
+def checks(e):
+    r = run(['gh', 'pr', 'checks', str(e['pr']), '-R', e['repo'], '--json', 'name,state,bucket'], check=False)
+    if 'no checks reported' in r.stderr:
+        return [], []
+    if r.returncode not in (0, 1, 8) or not r.stdout.strip():
+        raise Fail(f'gh pr checks failed: {(r.stderr or r.stdout).strip()[:300]}')
+    try:
+        cs = json.loads(r.stdout or '[]')
+    except ValueError:
+        raise Fail('gh pr checks returned invalid JSON')
+    return ([c['name'] for c in cs if c.get('bucket') in ('fail', 'cancel')],
+            [c['name'] for c in cs if c.get('bucket') == 'pending'])
+
+
+def view(e):
+    return gh_one('pr', 'view', str(e['pr']), '-R', e['repo'], '--json', 'state,headRefOid,autoMergeRequest,mergeCommit,url')
+
+
+def disable_auto(e, notes):
+    run(['gh', 'pr', 'merge', str(e['pr']), '-R', e['repo'], '--disable-auto'])
+    e['auto_merge'] = None
+    notes.append('auto-merge disabled')
+
+
+def cmd_open(a, st):
+    wt = os.path.abspath(a.worktree)
+    head = run(['git', '-C', wt, 'rev-parse', 'HEAD']).stdout.strip()
+    branch = run(['git', '-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD']).stdout.strip()
+    info = gh_one('repo', 'view', '--json', 'nameWithOwner,defaultBranchRef', cwd=wt)
+    base = a.base or info['defaultBranchRef']['name']
+    if branch in ('HEAD', base):
+        raise Fail(f'{wt} is on {branch}, not a lane branch')
+    e = st.data['prs'].get(a.lane)
+    if e and (e['branch'] != branch or e['status'] != 'open'):
+        raise Fail(f'lane {a.lane} already records {e["branch"]} #{e["pr"]} ({e["status"]})')
+    if e and e['head'] != head:
+        raise Fail(f'lane {a.lane} records head {e["head"]}, the worktree is at {head}: push and run repair-pushed')
+    run(['git', '-C', wt, 'push', '-q', '-u', 'origin', branch])
+    notes, repo = [], info['nameWithOwner']
+    # gh matches --head by name alone: a fork's pull request from a branch of this name is never this lane's.
+    found = [p for p in gh_one('pr', 'list', '-R', repo, '--head', branch, '--state', 'open',
+                               '--json', 'number,url,isCrossRepository', cwd=wt) if not p.get('isCrossRepository')]
+    if found:
+        num, url = found[0]['number'], found[0]['url']
+    else:
+        lines = open(a.body).read().splitlines()
+        title = re.sub(r'^#+\s*', '', lines[0]).strip() if lines else ''
+        body = [l for l in lines[1:] if not l.strip().startswith('Review:')]
+        at = next((i for i, l in enumerate(body) if 'Generated with' in l), len(body))
+        body[at:at] = [a.review, ''] if at < len(body) else ['', a.review]
+        with tempfile.NamedTemporaryFile('w', suffix='.md', delete=False) as f:
+            f.write('\n'.join(body).strip() + '\n')
+        try:
+            url = run(['gh', 'pr', 'create', '-R', repo, '--base', base, '--head', branch, '--title', title,
+                       '--body-file', f.name], cwd=wt).stdout.strip().splitlines()[-1]
+        finally:
+            os.unlink(f.name)
+        num = int(re.search(r'/pull/(\d+)', url).group(1))
+        notes.append('pull request created')
+    e = e or {'lane': a.lane, 'repo': repo, 'worktree': wt, 'branch': branch, 'pr': num, 'url': url, 'head': head,
+              'reviewers': [], 'asks': [], 'status': 'open', 'auto_merge': None, 'repairs': 0}
+    if e['pr'] != num:  # a different pull request: earlier asks and auto-merge were on the old number
+        notes.append(f'recorded #{e["pr"]} replaced by #{num}')
+        e.update(pr=num, url=url, asks=[], auto_merge=None)
+    e['reviewers'] = sorted(set(e['reviewers']) | set(a.reviewer or []))  # never fewer than asked
+    st.data['prs'][a.lane] = e
+    st.save()
+    live = view(e)['headRefOid']
+    if live != head:
+        raise Fail(f'#{num} head is {live}, not the pushed {head}; nobody asked')
+    for r in e['reviewers']:
+        ask(e, r, head, notes)
+        st.save()
+    return {'lane': a.lane, 'pr': num, 'url': url, 'head': head, 'reviewers': e['reviewers'], 'notes': notes}, []
+
+
+def bugbot_comment(e, a, notes):
+    """After a request that may not have queued (no response or a 5xx) and no run seven minutes on,
+    ask once by comment; recorded on the ask so it is never repeated."""
+    if a.get('via') != 'api' or not a['outcome'].startswith('uncertain') or a.get('comment_at') \
+            or age(a['at']) < BUGBOT_START_S:
+        return
+    out = run(['gh', 'pr', 'comment', str(e['pr']), '-R', e['repo'], '--body', 'bugbot run']).stdout
+    m = re.search(r'#issuecomment-(\d+)', out)
+    a.update(comment_at=iso(now()), comment_id=int(m.group(1)) if m else None)
+    notes.append('bugbot: no run seven minutes after an uncertain request; asked by comment')
+
+
+def verdict_of(e, head, notes, need):
+    """Each reviewer's verdict on head, and the reviewers the head still needs a verdict from."""
+    got, required = {}, []
+    for r in e['reviewers']:
+        if r == 'codex':
+            got['codex'], answered, refused = codex_read(e, head)
+            a = (asks(e, 'codex', head) or [None])[-1]
+            if not a:
+                need('codex not asked for this head (rerun open)')
+                required.append('codex')
+                continue
+            if not got['codex'] and not a.get('fallback') and (refused or (not answered and age(a['at']) >= CODEX_SILENT_S)):
+                a['fallback'] = refused or 'no reaction or reply in ten minutes'
+            if a.get('fallback') and not asks(e, 'bugbot', head):
+                ask(e, 'bugbot', head, notes)  # retried each sweep until a request has been made
+            required.append('bugbot' if a.get('fallback') else 'codex')
+        else:
+            required.append('bugbot')
+    if asks(e, 'bugbot', head):
+        required.append('bugbot')  # once asked for this head, Bugbot stays required whatever Codex does
+    for r in dict.fromkeys(required):
+        if r == 'bugbot':
+            got['bugbot'], why = bugbot_read(e, head)
+            if not got['bugbot']:
+                notes.append(f'bugbot: {why}')
+            if why == 'no run' and asks(e, 'bugbot', head):
+                bugbot_comment(e, asks(e, 'bugbot', head)[-1], notes)
+        ba = asks(e, r, head)
+        if not ba:
+            need(f'{r} not asked for this head' + (' (bugbot key unavailable)' if not os.path.exists(key_path()) and r == 'bugbot' else ''))
+        elif ba[-1]['outcome'].startswith('refused'):
+            need(f'{r} request refused: {ba[-1]["outcome"]}')
+        elif not got.get(r) and age(ba[-1].get('comment_at') or ba[-1]['at']) >= VERDICT_LIMIT_S:
+            last = ba[-1].get('comment_at') or ba[-1]['at']
+            need(f'no {r} verdict twenty minutes after the request at {last} (not asked again)')
+    return got, list(dict.fromkeys(required))
+
+
+def sweep_one(e, signed, report):
+    held = []
+
+    def need(what):  # anything reported for this pull request also holds its merge
+        held.append(what)
+        report(what)
+
+    notes, v = [], view(e)
+    line = {'lane': e['lane'], 'pr': e['pr'], 'url': e['url'], 'state': v['state'], 'head': v['headRefOid'], 'notes': notes}
+    if v['state'] == 'MERGED':
+        e.update(status='merged', merged_seen=iso(now()), merge_commit=(v.get('mergeCommit') or {}).get('oid'))
+        line['action'] = 'merged'
+        return line
+    if v['state'] == 'CLOSED':
+        e['status'] = 'closed'
+        need('closed without merging')
+        return line
+    head, auto = v['headRefOid'], v.get('autoMergeRequest') is not None
+    if head != e['head']:
+        if auto:
+            disable_auto(e, notes)
+        need(f'head moved to {head}, recorded {e["head"]}: run repair-pushed')
+        line['action'] = 'held'
+        return line
+    failing, pending = checks(e)
+    if BUGBOT_CHECK in failing:  # Bugbot's own run concluding failure is review findings, not CI
+        runs = bugbot_runs(e, head)
+        if runs and all((r.get('app') or {}).get('slug') == 'cursor' for r in runs):
+            failing = [n for n in failing if n != BUGBOT_CHECK]
+    line.update(failing=failing, pending=pending)
+    for name in failing:
+        need(f'check failing: {name}')
+    got, required = verdict_of(e, head, notes, need)
+    unresolved = [t for t in threads(e) if not t.get('isResolved')]
+    line.update(reviews=got, required=required, unresolved=len(unresolved))
+    for t in unresolved:
+        need('unresolved thread: ' + thread_text(t))
+    blocked = [f'{r} {got.get(r) or "no verdict"}' for r in required if got.get(r) != 'clear'
+               and not (got.get(r) == 'findings' and signed)]
+    blocked += ['findings from ' + r for r, g in got.items() if g == 'findings' and r not in required and not signed]
+    for r in required:
+        if got.get(r) == 'findings' and not signed:
+            need(f'{r} findings on {head[:10]}: read and fix, or answer and resolve then sweep --signed-off')
+    blocked += [f'{len(unresolved)} unresolved thread(s)'] * bool(unresolved) + ['failing checks'] * bool(failing)
+    blocked += [f'{len(held)} hold(s) under needs you'] * bool(held and not blocked)
+    if blocked:
+        if auto:
+            disable_auto(e, notes)
+        line['action'] = 'waiting: ' + '; '.join(blocked)
+        return line
+    if auto and (e.get('auto_merge') or {}).get('head') == head:
+        line['action'] = 'auto-merge on'
+        return line
+    if auto:
+        disable_auto(e, notes)  # enabled outside this tool: re-enable only after run-check says clear
+    rc = run([RUN_CHECK, 'land', '--repo', e['worktree'], '--pr', str(e['pr']), '--head', head]
+             + (['--signed-off', signed] if signed else []), check=False)
+    said = (rc.stdout + rc.stderr).strip().splitlines()
+    if rc.returncode == 0:
+        run(['gh', 'pr', 'merge', str(e['pr']), '-R', e['repo'], '--auto', '--squash', '--match-head-commit', head])
+        e['auto_merge'] = {'head': head, 'at': iso(now())}
+        line['action'] = f'auto-merge enabled at {head}'
+    elif rc.returncode == 4:
+        line['action'] = 'waiting: ' + '; '.join(said)
+    else:
+        need(f'run-check land exited {rc.returncode}: ' + ' | '.join(said))
+        line['action'] = 'refused by run-check'
+    return line
+
+
+def cmd_sweep(a, st):
+    signed = dict(s.split('=', 1) for s in a.signed_off or [])
+    lines, needs = [], []
+    for lane, e in sorted(st.data['prs'].items()):
+        if e['status'] != 'open':
+            continue
+        need = lambda what, lane=lane, e=e: needs.append({'lane': lane, 'pr': e['pr'], 'what': what})
+        try:
+            lines.append(sweep_one(e, signed.get(lane), need))
+        except Fail as err:
+            need(f'error: {err}')
+        st.save()
+    return lines, needs
+
+
+def cmd_answer(a, st):
+    e, out = st.lane(a.lane), []
+    pat = re.compile(a.match)
+    for t in threads(e):
+        c = (t['comments']['nodes'] or [{}])[0]
+        if t.get('isResolved') or not (pat.search(thread_body(t)) or pat.search(thread_text(t))):  # what sweep shows
+            continue
+        run(['gh', 'api', f'repos/{e["repo"]}/pulls/{e["pr"]}/comments/{c["databaseId"]}/replies', '-f', f'body={a.reply}'])
+        run(['gh', 'api', 'graphql', '-f', f'id={t["id"]}', '-f', f'query={RESOLVE_Q}'])
+        out.append('answered and resolved: ' + thread_text(t))
+    return {'lane': a.lane, 'pr': e['pr'], 'answered': out}, []
+
+
+def cmd_repair(a, st):
+    e, notes = st.lane(a.lane), []
+    v = view(e)
+    if v['state'] != 'OPEN' or v['headRefOid'] == e['head']:
+        raise Fail(f'#{e["pr"]} is {v["state"]} at the recorded head {e["head"]}: push the repair first')
+    if v.get('autoMergeRequest') is not None:
+        disable_auto(e, notes)
+    e.update(head=v['headRefOid'], reviewers=['codex'], repairs=e.get('repairs', 0) + 1)
+    if e['repairs'] > 2:
+        notes.append(f'repair round {e["repairs"]}: the review rule caps a pull request at two')
+    st.save()
+    ask(e, 'codex', e['head'], notes)
+    return {'lane': a.lane, 'pr': e['pr'], 'head': e['head'], 'notes': notes}, []
+
+
+def show(verb, result, needs, as_json):
+    if as_json:
+        print(json.dumps({'verb': verb, 'result': result, 'needs_you': needs}, indent=1))
+        return
+    for r in result if isinstance(result, list) else [result]:
+        bits = [f'{k} {v}' for k, v in (r.get('reviews') or {}).items()]
+        if r.get('failing') or r.get('pending'):
+            bits.append(f'checks {len(r.get("failing", []))} failing {len(r.get("pending", []))} pending')
+        bits += [f'{r["unresolved"]} unresolved'] * bool(r.get('unresolved'))
+        print(f'{r.get("lane")} #{r.get("pr")} {(r.get("head") or "")[:10]} {r.get("action", "")} '
+              + '; '.join(bits + r.get('notes', []) + r.get('answered', [])))
+    print('needs you:' + ('' if needs else ' nothing'))
+    for n in needs:
+        print(f'  {n["lane"]} #{n["pr"]}: {n["what"]}')
+
+
+def main(argv=None):
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument('--run', required=True, help='the run folder holding state.json')
+    common.add_argument('--json', action='store_true')
+    p = argparse.ArgumentParser(prog='run-drive', description=__doc__.split('\n')[0])
+    sub = p.add_subparsers(dest='verb', required=True)
+    o = sub.add_parser('open', parents=[common], help='push, open the pull request, ask the named reviewers')
+    o.add_argument('--lane', required=True)
+    o.add_argument('--worktree', required=True)
+    o.add_argument('--body', required=True, help='PR.md: the title on line one, then the body')
+    o.add_argument('--review', required=True, help='the "Review: ..." line for the body')
+    o.add_argument('--reviewer', action='append', choices=['codex', 'bugbot'])
+    o.add_argument('--base')
+    s = sub.add_parser('sweep', parents=[common], help='one pass over every open pull request')
+    s.add_argument('--signed-off', action='append', metavar='LANE=WHY')
+    w = sub.add_parser('answer', parents=[common], help='reply to and resolve matching unresolved threads')
+    w.add_argument('--lane', required=True)
+    w.add_argument('--match', required=True)
+    w.add_argument('--reply', required=True)
+    r = sub.add_parser('repair-pushed', parents=[common], help='record a pushed repair and ask Codex once')
+    r.add_argument('--lane', required=True)
+    a = p.parse_args(argv)
+    if a.verb == 'open' and not a.review.startswith('Review:'):
+        p.error('--review must be the "Review: ..." line')
+    if a.verb == 'sweep' and any('=' not in x for x in a.signed_off or []):
+        p.error('--signed-off takes LANE=WHY')
+    try:
+        st = State(a.run)
+        fn = {'open': cmd_open, 'sweep': cmd_sweep, 'answer': cmd_answer, 'repair-pushed': cmd_repair}[a.verb]
+        result, needs = fn(a, st)
+        st.save()
+    except Fail as e:
+        if a.json:
+            print(json.dumps({'verb': a.verb, 'error': str(e)}))
+        print(f'run-drive: {e}', file=sys.stderr)
+        return 2
+    show(a.verb, result, needs, a.json)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -4,7 +4,7 @@ A run is one root working a goal across many tasks and landing them by pull requ
 protocol; `run-claude.md` or `run-pi.md` beside it holds what differs by harness. Whatever must hold every time is
 enforced by a tool and listed under Gates; the rest is judgement.
 
-Roots are Claude Code (Opus 5.5 at high) and pi (gpt-6.2-sol at high). Codex is not a run root.
+Roots are Claude Code and pi; Codex is not a run root.
 
 ## Start
 
@@ -43,9 +43,9 @@ While he is present:
 ## Land
 
 - Each pull request lands on its own through `run-check land` when required checks are green on the exact commit and
-  review is settled. The review table is `reference/review.md` in the agent home. Ask for review when the pull request
-  opens. Batch small related issues into one pull request. A lane may build on an unmerged branch and rebase when that
-  lands.
+  review is settled; `run-drive` (appendix) does the mechanics. The review table is `reference/review.md` in the agent
+  home. Ask for review when the pull request opens. Batch small related issues into one pull request. A lane may
+  build on an unmerged branch and rebase when that lands.
 - Two repair rounds for any task. After the second, what is left and not blocking goes on a follow-up issue and the
   change lands. A finding marked blocker, security, privacy or data loss holds the merge. Lint, format and docstring
   failures are fixed in place.
@@ -63,14 +63,14 @@ everything else apply your recommendation and record it. Put parked questions to
 ## Stop
 
 Stop when the goal is met or the queue is empty, or after three hours with nothing merged (say why). Then:
-- `run-check reap`: every worktree of the run is gone. Work that did not land is a pushed branch with a draft pull
-  request labelled `unlanded` whose body is the lane's return, or a patch file in the run folder where a push is not
-  possible.
+- `run-check reap --run <run folder>` is a dry run; with `--apply` it removes the run's merged worktrees: none may be
+  left. Work that did not land is a pushed branch with a draft pull request labelled `unlanded` whose body is the lane's return, or, where a push is not possible, a patch at
+  `<run folder>/patches/<repository folder name>/<branch with % and / percent-encoded>.patch`.
 - Write `CLOSEOUT.md` in the run folder, about 300 words: first line `# Closeout: <repo> run-<YYYYMMDD>-<n>`, then
   `protocol: v5`, then `## Landed` (`- #<n> <title>` per pull request), `## Parked`, `## Decisions needed` and
   `## Spend by role`.
 - Close each issue you verified, with the evidence in a comment.
-- `run-check close` passes.
+- `run-check close --run <run folder>` passes (`--repo <checkout>` per other repository).
 
 ## Gates
 

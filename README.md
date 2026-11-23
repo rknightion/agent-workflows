@@ -44,18 +44,14 @@ Everything lives in `plugins/agent-workflows/`.
 - `bin/`: the programs the protocol tells the root and the lanes to run. While the plugin is enabled,
   Claude Code puts this directory on the Bash tool's PATH, so the skill, the root and the lanes run
   them by name.
-  - `loop-lint`: the charter, queue, parked-work and `LOOP.md` linter.
-  - `loop-land`: the landing tool. `ready` decides whether a pull request (or, in direct mode, a
-    commit) may land now and prints the merge command for the root to run; `verify` records what
-    the merge did to main and any deploy; `abandon` and `summary` close the record. It never merges
-    or pushes itself, and it keeps its ledger in the run directory (`landings.jsonl`). Two states stop
-    a run on purpose: see "When `loop-land` stops on purpose" below.
   - `run-check`: the run brief's checks. `land` says whether a pull request may land now and refuses
     guarded diffs until the root signs them off, `reap` removes the run's merged worktrees and `close`
     says whether the run can close. It never merges or pushes.
-  - `loop-teardown`: removes the worktrees, caches and large logs a run left behind (`closeout` for
-    one run, `reap` for every finished run of a repository), archiving anything not already on a
-    remote first. It is a dry run unless given `--apply`.
+  - `run-drive`: the mechanical part of landing, one pass per call. `open` pushes a lane's branch,
+    opens its pull request and asks the named reviewers; `sweep` goes over every open pull request
+    of the run and enables auto-merge on an exact head only when its reviews, threads, checks and
+    `run-check land` are all clear; `answer` and `repair-pushed` handle review threads and repairs.
+    It never merges and never waits.
   - `wait-until`: a bounded wait. It runs a test command until it exits 0 or a timeout passes, and
     exits 124 on the timeout, so a root or lane never waits without a deadline.
 - `tools/dsreview/`: `dsreview`, a code reviewer for lanes. It sends a candidate change and its
@@ -65,34 +61,26 @@ Everything lives in `plugins/agent-workflows/`.
   against about $1.09. It is optional and needs your own gateway: see `tools/dsreview/README.md`.
 - `tools/tracker/`: `tracker`, a thin shim over `gh` for GitHub issues and labels: `queue` lists the
   open issues labelled `ready`, and `create`, `claim`, `status`, `handoff`, `tick` and `close` write
-  them as your `gh` login. `close` posts an evidence comment, then closes the issue. The protocol's
-  `just tracker <command>` is a recipe of your own that runs it: see
+  them as your `gh` login. `close` posts an evidence comment, then closes the issue. A
+  `just tracker <command>` recipe of your own can run it: see
   `protocol/README.md` and `tools/tracker/README.md`.
-- `protocol/`: the contract, the three harness files, the charter and lane templates, the planner,
-  the review profiles and the board setup guide. See `protocol/README.md`.
+- `protocol/`: the run brief (`loop/run.md`) and its Claude Code and pi appendices. See
+  `protocol/README.md`.
 
 ## Requirements
 
 - Claude Code with plugin support (tested with 2.1.303). The skill relies on Claude Code
   substituting `${CLAUDE_PLUGIN_ROOT}` in skill text, and the protocol relies on the plugin `bin/`
   directory being on the Bash tool's PATH.
-- git, and Python 3.9 or later for the hooks and the programs in `bin/`. `shasum` (or another way to
-  take a sha256) for the Standing file and lane patches.
-- The GitHub CLI `gh`, signed in to the repository's host: `loop-land` reads required checks, pull
-  requests and main's CI through it, the root merges with `gh pr merge`, and a GitHub tracker is read
-  with it. `loop-lint loopmd --offline` and `loop-lint charter --offline` skip its online checks.
-- A tracker with ready work, one of:
-  - GitHub issues. `LOOP.md` either says `tracker: github` (then it also needs `landing: pr` and a
-    `## Queue` section) or names no tracker in a repository without a `backlog/` directory. Issues
-    can live in another repository with `tracker-repo: OWNER/REPO`.
-  - A Backlog.md board: a `backlog/` directory and the Backlog.md CLI (`backlog`), which the root
-    and `loop-lint queue` read tasks through.
-- Recommended: `just`, because the protocol's gate and verification examples are `just` recipes
-  (any gate command works).
+- git, and Python 3.9 or later for the hooks and the programs in `bin/`.
+- The GitHub CLI `gh`, signed in to the repository's host: `run-check` and `run-drive` read pull
+  requests, checks and reviews through it, and the root opens issues and pull requests with it.
+- Something to do: what you name when you start a run, or open GitHub issues labelled `ready`.
+- Recommended: `just`, because the protocol's gate examples are `just` recipes (any gate command
+  works).
 - For the tracker tool, only if you use it: Python 3.12 or later and `gh` signed in.
 - Optional: `dsreview` (in this plugin, Python 3.12 or later and a Cloudflare AI Gateway with a
-  DeepSeek key), one command that can fill the lane template's local review step. With no local
-  reviewer, the planner freezes `none` there and lanes return `"review":null`.
+  DeepSeek key), a cheap reviewer a root can run on a lane's change.
 
 ## Install
 
@@ -115,54 +103,28 @@ one skill, six agents and the hooks.
 
 ## Prepare a repository
 
-1. Give the loop a tracker with some ready work: GitHub issues, or a Backlog.md board
-   (`backlog init`, see `protocol/docs/backlog-board-setup.md`).
-2. Ignore the run directory: loop files live in `codex/` and never get committed.
+1. Ignore the run directory: run files live in `codex/` and never get committed.
 
    ```sh
    mkdir -p codex && echo 'codex/' >> .gitignore
    ```
 
-3. Write `LOOP.md` at the repository root: the facts every run and every lane needs. Keep it under
-   6 KB and free of dates and loop numbers. A minimal one:
+2. Write `LOOP.md` at the repository root: the facts every run and every lane needs, which the root
+   reads before it starts. Keep it short and free of dates. A minimal one:
 
    ```markdown
    # Loop: my-repo
-   tier: routine
    gate: just check
-   ci-required: none
-   grafana-stack: none
+   guarded-paths: migrations/**, .github/workflows/**
 
-   ## Lane brief
+   ## Traps
 
-   - Build and test with `just check`; it must pass before a candidate is handed back.
-   - Never edit `migrations/` without a task that names it.
+   - Build and test with `just check`; it must pass before a lane hands its change back.
    ```
 
-   `tier` is `routine` or `guarded` (guarded runs get a security review before anything lands),
-   `gate` is the command that proves a change, `ci-required` names required CI checks or `none`,
-   and `grafana-stack` names a telemetry stack or `none`. With no `tracker:` key, a repository with a
-   `backlog/` directory uses its board and lands commits directly on main (`landing: pr` lands by
-   pull request instead); one without uses GitHub issues and lands by pull request. To declare a GitHub
-   tracker, add `tracker: github`, `landing: pr` and a `## Queue` section that names the command
-   printing your ready issues in priority order and says that only the root writes issues:
-
-   ```markdown
-   # Loop: my-repo
-   tier: routine
-   gate: just check
-   ci-required: none
-   grafana-stack: none
-   tracker: github
-   landing: pr
-
-   ## Queue
-
-   Ready issues, in priority order: `just tracker queue` (a recipe of your own that runs
-   `tools/tracker/tracker.py`, see `protocol/README.md`). Only the root writes issues.
-   ```
-
-   Inside Claude Code, check it with `loop-lint loopmd LOOP.md --offline`.
+   `gate` is the command that proves a change (name a remote runner here if builds should not run on
+   your workstation) and `guarded-paths` lists the paths `run-check land` refuses until the root signs
+   the diff off after a fresh-context review.
 
 ## Start a run
 
@@ -174,30 +136,6 @@ one skill, six agents and the hooks.
 3. The run stops when the goal is met or the queue is empty, with every worktree gone and a
    `CLOSEOUT.md` in the run folder.
 
-### When `loop-land` stops on purpose
-
-Two states stop a run and need the repository owner, never the loop root:
-
-- A pull request merged while `ready` was waiting. `ready` stopped with exit 30 and took no slot, so
-  no landing is recorded.
-- `verify` returned `wrong-head` (exit 21): the pull request merged with a head other than the slot's.
-  The landing slot stays held, so every later `ready` is `slot-busy`.
-
-The owner first confirms on GitHub what merged (`gh pr view <n> --json headRefOid,mergeCommit`). If it
-is the change the run meant to land, the owner runs
-
-```sh
-loop-land adopt --repo <path> --run-dir <dir> --pr <n> --merged-head <sha> --reason "<why>"
-```
-
-with `--issues 11,12` as well when no slot or earlier event for the pull request names them, and then
-`loop-land verify --repo <path> --run-dir <dir> --pr <n>`. `adopt` writes one `merged` event, frees
-the slot when it names this pull request, and never merges, pushes or writes to GitHub. It refuses
-and writes nothing unless GitHub shows the pull request merged at exactly `--merged-head` with a
-merge commit on main. Exit 40 means it is not adoptable and 41 means the ledger already records the
-merge. If the merged change is not what the run meant to land, do not adopt: fix forward by hand and
-say so in the closeout.
-
 ## What the hooks write outside the repository
 
 - Under `~/.local/state/agent-loops/`: one line per lane return in `lane-returns/<session>.jsonl`
@@ -206,8 +144,8 @@ say so in the closeout.
 
 ## Not included
 
-- pi and Codex runtimes. The pi appendix and the Loop v4 harness files are in `protocol/loop/` for
-  reference, but this plugin supplies only the Claude Code hooks and agents. Codex is not a run root.
+- pi and Codex runtimes. The pi appendix is in `protocol/loop/` for reference, but this plugin
+  supplies only the Claude Code hooks and agents. Codex is not a run root.
 - Tools from the author's own setup: syncing `codex/` between machines, the session catalogue that reports a run's usage, the remote gate
   runner, the watchdog and scheduled verification. The protocol mentions some of them; skip those
   steps.
@@ -215,10 +153,9 @@ say so in the closeout.
 ## Development
 
 `just check` runs the syntax checks and the tests in `tests/`, which drive the hooks over
-Claude-shaped input and `loop-lint` against temporary repositories, run `wait-until` to a pass and to a
-timeout, and drive `dsreview` against a local fake gateway. It also runs the `loop-land` tests, which
-drive every command of the landing tool against temporary repositories with a stand-in `gh`, and the
-tracker tests, which drive the tracker against a stand-in `gh` (they skip below Python 3.12).
+Claude-shaped input, check that `run-check` and `run-drive` start, run `wait-until` to a pass and to a
+timeout, and drive `dsreview` against a local fake gateway. It also runs the tracker tests, which drive
+the tracker against a stand-in `gh` (they skip below Python 3.12).
 `claude plugin validate .` checks the manifests.
 
 ## Where this comes from

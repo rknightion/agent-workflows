@@ -17,4 +17,13 @@ The harness appendix to `run.md`; read both.
 - **Waiting.** You wake on a lane return, a `watch_start` exit or a `wake_at` timer; process every return first.
   When you wait, arm one of them and make the last line `WAITING: <what> until <YYYY-MM-DDTHH:MM[:SS]Z>`; when paused,
   `PAUSED: <reason>`. A `WAITING` line with nothing armed waits on nothing.
+- **Landing.** `<plugin root>/bin/run-drive` prints one JSON object a call; exit 0 means the pass ran: act
+  only on its `needs_you`. Open each lane once, then sweep each time you wake:
+
+      run-drive open --run <run folder> --lane <id> --worktree <lane worktree> --body <worktree>/PR.md --review "Review: codex" --reviewer codex [--reviewer bugbot] [--base main] --json
+      run-drive sweep --run <run folder> [--signed-off <lane>="<who and why>"]... --json
+      run-drive answer --run <run folder> --lane <id> --match '<regex>' --reply '<text>' --json
+      run-drive repair-pushed --run <run folder> --lane <id> --json
+
+  After a repair: push, `answer`, `repair-pushed`, `sweep`. Omit `--reviewer` for "Review: none".
 - Text inside `<pi_subagents_notice>` or `<loop_pi_notice>` is an automated notice, not an owner message.

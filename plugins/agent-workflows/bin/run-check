@@ -2,14 +2,23 @@
 """run-check: the three things a run must not get wrong, checked from git and gh with no state.
 
   run-check land  --repo <dir> --pr <n> --head <sha> [--signed-off "<who and why>"]
-  run-check reap  --root <dir> [--apply]
-  run-check close --root <dir> --run <run folder> [--repo <dir>]... [--prefix <branch prefix>]
+  run-check reap  --run <run folder> [--apply]      (or --root <dir>, or --repo <dir>... --prefix P)
+  run-check close --run <run folder> [--prefix P] [--repo <dir>]... [--root <dir>]
+
+--run names the run folder, <checkout>/codex/run-<YYYYMMDD>-<n>: the checkout holding it is always
+one of the run's repositories (--repo adds others) and --prefix defaults to the folder's name, the
+run's branch prefix.
+
+A run's worktrees are the linked worktrees of each --repo whose branch is the prefix or under
+<prefix>/, wherever they live, plus every linked worktree under --root (the folder holding the lane
+worktrees). --prefix matches whole branch path segments: run-20261123-1 never matches
+run-20261123-10/x.
 
 land exits 0 clear, 3 refused (hits one per line), 4 not ready, 2 usage or tool error. It never
-merges. reap removes the worktrees under <dir> whose pull request merged, with their local
-branches (only with --apply). close exits 0 only when no worktree is left under <dir> and every
-unmerged branch of the run is an open draft pull request or has a patch under <run>/patches/;
-otherwise 3.
+merges. reap lists the run's worktrees whose pull request merged; with --apply it removes them and
+their local branches. close exits 0 only when no worktree of the run is left and every unmerged
+branch under the prefix is an open draft pull request or has a patch under <run>/patches/;
+otherwise 3. close refuses to run without a prefix: it would judge every local branch.
 """
 import argparse
 import fnmatch
@@ -21,7 +30,7 @@ import sys
 
 CLEAR, ERROR, REFUSED, NOT_READY = 0, 2, 3, 4
 HANDBACK = {'return.md', 'PR.md', 'candidate.patch'}
-# Ignored directories reap may delete with a worktree: the regenerable caches loop-teardown also strips.
+# Ignored directories reap may delete with a worktree: regenerable caches.
 REGEN = {'node_modules', '.terraform', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache'}
 
 TEST_FILE = re.compile(r'(^|/)(tests?|__tests__|spec)/|(^|/)test_[^/]*\.py$|_test\.(py|go)$'
@@ -138,16 +147,23 @@ def refusals(diff_text, guard_globs):
 
 
 def pr_checks(repo, pr, required):
+    """Check rows, whatever they say: land classifies them. gh exits 8 while checks are pending and 1
+    when one failed (releases that apply those codes with --json too); either is a reading, not an
+    error, when the rows came back as JSON."""
     r = run(['gh', 'pr', 'checks', str(pr), '--json', 'name,state,bucket'] + (['--required'] if required else []),
             cwd=repo, check=False)
+    if r.returncode in (0, 1, 8):
+        try:
+            rows = json.loads(r.stdout)
+        except ValueError:
+            rows = None
+        if isinstance(rows, list):
+            return rows
+    if r.returncode != 0 and ('no required checks reported' in r.stderr or 'no checks reported' in r.stderr):
+        return []
     if r.returncode != 0:
-        if 'no required checks reported' in r.stderr or 'no checks reported' in r.stderr:
-            return []
         raise Fail(f'gh pr checks failed: {(r.stderr or r.stdout).strip()[:300]}')
-    try:
-        return json.loads(r.stdout)
-    except ValueError:
-        raise Fail('gh pr checks returned invalid JSON')
+    raise Fail('gh pr checks returned invalid JSON')
 
 
 def land(a):
@@ -190,6 +206,26 @@ def land(a):
     return CLEAR
 
 
+def on_run(branch, prefix):
+    """Whether branch is the run prefix or a branch under it, matched on whole path segments."""
+    p = prefix.rstrip('/')
+    return bool(p) and (branch == p or branch.startswith(p + '/'))
+
+
+def run_worktrees(root, repos, prefix):
+    """The run's linked worktrees: those under root, and those of each repo on a prefix branch."""
+    found = set(worktrees(root)) if root else set()
+    for repo in repos if prefix else []:
+        entries = git(repo, 'worktree', 'list', '--porcelain').stdout.split('\n\n')
+        for entry in entries[1:]:  # the first entry is the main checkout
+            path = next((l[9:] for l in entry.splitlines() if l.startswith('worktree ')), '')
+            branch = next((l[len('branch refs/heads/'):] for l in entry.splitlines()
+                           if l.startswith('branch refs/heads/')), '')
+            if path and os.path.isdir(path) and on_run(branch, prefix):
+                found.add(os.path.realpath(path))
+    return sorted(found)
+
+
 def worktrees(root):
     """Linked git worktrees at or under root (never a main checkout or a submodule)."""
     root, found = os.path.realpath(root), {}
@@ -219,18 +255,67 @@ def worktrees(root):
 
 
 def pr_for(cwd, branch):
-    """The newest pull request whose head is branch, or None."""
+    """The newest pull request from this repository whose head is branch, or None.
+
+    gh matches --head by name alone, so a fork's pull request from its own branch of that name is dropped."""
     prs = gh_json(cwd, 'pr', 'list', '--head', branch, '--state', 'all', '--limit', '20',
-                  '--json', 'number,state,isDraft,headRefOid,headRefName')
-    prs = [p for p in prs if p.get('headRefName', branch) == branch]
+                  '--json', 'number,state,isDraft,headRefOid,headRefName,isCrossRepository')
+    prs = [p for p in prs if p.get('headRefName', branch) == branch and not p.get('isCrossRepository')]
     return max(prs, key=lambda p: p['number']) if prs else None
 
 
+def run_prefix(a):
+    """The run's branch prefix: --prefix, else the --run folder's name when it is run-<YYYYMMDD>-<n>."""
+    if a.prefix is not None:
+        return a.prefix
+    name = os.path.basename(os.path.abspath(a.run)) if a.run else ''
+    return name if re.fullmatch(r'run-\d{8}-\d+', name) else ''
+
+
+def run_repos(a):
+    """The run's repositories: each --repo, and the checkout holding the --run folder unless one of them
+    is already that repository. A run folder outside any checkout is an error only when no --repo is given."""
+    repos = [os.path.abspath(r) for r in a.repo or []]
+    if not a.run:
+        return repos
+    own = git(os.path.abspath(a.run), 'rev-parse', '--show-toplevel', check=not repos)
+    if own.returncode == 0 and common_dir(own.stdout.strip()) not in {common_dir(r) for r in repos}:
+        repos.append(own.stdout.strip())
+    return repos
+
+
+def common_dir(path):
+    """The git directory a checkout and its linked worktrees share, so one repository counts once."""
+    r = git(path, 'rev-parse', '--git-common-dir', check=False)
+    return os.path.realpath(os.path.join(path, r.stdout.strip())) if r.returncode == 0 else os.path.realpath(path)
+
+
+def default_branches(cwd):
+    """The names reap never removes: origin's default branch, read live if no local ref records it, and main, master."""
+    names = {'main', 'master'}
+    local = git(cwd, 'symbolic-ref', '--short', '-q', 'refs/remotes/origin/HEAD', check=False).stdout.strip()
+    if local:
+        names.add(local.split('/', 1)[-1])
+    else:
+        m = re.search(r'^ref: refs/heads/(\S+)\tHEAD$',
+                      git(cwd, 'ls-remote', '--symref', 'origin', 'HEAD', check=False).stdout, re.M)
+        if m:
+            names.add(m.group(1))
+    return names
+
+
 def reap(a):
-    for wt in worktrees(a.root):
+    prefix = run_prefix(a)
+    repos = run_repos(a) if prefix.strip('/') else []
+    if not a.root and not repos:
+        raise Fail('reap needs --run <run folder>, --root, or --repo with --prefix')
+    for wt in run_worktrees(a.root, repos, prefix):
         branch = git(wt, 'rev-parse', '--abbrev-ref', 'HEAD').stdout.strip()
         if branch == 'HEAD':
             print(f'kept {wt}: detached HEAD, no branch to look up')
+            continue
+        if branch in default_branches(wt):
+            print(f'kept {wt} ({branch}): the default branch is never reaped')
             continue
         status = git(wt, 'status', '--porcelain', '--untracked-files=all', '--ignored').stdout.splitlines()
         dirty = [l[3:] for l in status if not l.startswith(('??', '!!'))]
@@ -261,22 +346,23 @@ def reap(a):
 
 
 def close(a):
-    run_dir = os.path.abspath(a.run)
-    repos = a.repo or [git(run_dir, 'rev-parse', '--show-toplevel').stdout.strip()]
-    merged, kept, blocking = [], [], [f'worktree left: {wt}' for wt in worktrees(a.root)]
+    a.prefix = run_prefix(a)
+    if not a.prefix.strip('/'):
+        raise Fail('close needs --prefix, or a --run folder named run-<YYYYMMDD>-<n>')
+    run_dir, repos = os.path.abspath(a.run), run_repos(a)
+    merged, kept, blocking = [], [], [f'worktree left: {wt}' for wt in run_worktrees(a.root, repos, a.prefix)]
     for repo in repos:
         repo = os.path.abspath(repo)
         default = git(repo, 'symbolic-ref', '--short', '-q', 'refs/remotes/origin/HEAD', check=False).stdout.strip()
         skip = {default.split('/', 1)[-1], 'main', 'master'}
         local = [b for b in git(repo, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/').stdout.split()
-                 if b not in skip and (not a.prefix or b.startswith(a.prefix))]
+                 if b not in skip and on_run(b, a.prefix)]
         prs = {b: pr_for(repo, b) for b in local}
-        if a.prefix:
-            for p in gh_json(repo, 'pr', 'list', '--state', 'all', '--limit', '500',
-                             '--json', 'number,state,isDraft,headRefOid,headRefName'):
-                b = p.get('headRefName', '')
-                if b.startswith(a.prefix) and (b not in prs or not prs[b] or p['number'] > prs[b]['number']):
-                    prs[b] = p
+        for p in gh_json(repo, 'pr', 'list', '--state', 'all', '--limit', '500',
+                         '--json', 'number,state,isDraft,headRefOid,headRefName,isCrossRepository'):
+            b = p.get('headRefName', '')
+            if not p.get('isCrossRepository') and on_run(b, a.prefix) and (b not in prs or not prs[b] or p['number'] > prs[b]['number']):
+                prs[b] = p
         for b, pr in sorted(prs.items()):
             # <run>/patches/<repository folder name>/<branch, % and / percent-encoded>.patch: one name per branch.
             patch = os.path.join(run_dir, 'patches', os.path.basename(repo),
@@ -313,13 +399,19 @@ def main(argv=None):
     l.add_argument('--head', required=True)
     l.add_argument('--signed-off')
     r = sub.add_parser('reap', help='remove the worktrees whose pull request merged')
-    r.add_argument('--root', required=True)
-    r.add_argument('--apply', action='store_true')
+    r.add_argument('--run', help='the run folder: its checkout is always included and --prefix defaults to its name')
+    r.add_argument('--root', help='the folder holding the lane worktrees; every linked worktree under it counts')
+    r.add_argument('--repo', action='append', help="another repository checkout; its worktrees on --prefix branches count")
+    r.add_argument('--prefix', help='the run\'s branch prefix, run-<YYYYMMDD>-<n>')
+    r.add_argument('--apply', action='store_true',
+                   help='remove what it lists; without it reap is a dry run that changes nothing')
     c = sub.add_parser('close', help='is the run ready to close out')
-    c.add_argument('--root', required=True)
-    c.add_argument('--run', required=True)
-    c.add_argument('--repo', action='append')
-    c.add_argument('--prefix')
+    c.add_argument('--root', help='the folder holding the lane worktrees; every linked worktree under it counts')
+    c.add_argument('--run', required=True, help='the run folder, <checkout>/codex/run-<YYYYMMDD>-<n>')
+    c.add_argument('--repo', action='append',
+                   help="another repository checkout (the one holding --run is always included); its worktrees "
+                        "on --prefix branches count wherever they live")
+    c.add_argument('--prefix', help="the run's branch prefix (default: the --run folder's name)")
     a = p.parse_args(argv)
     if a.verb == 'land' and not re.fullmatch(r'[0-9a-f]{40}', a.head):
         p.error('--head must be a full 40-character commit SHA')

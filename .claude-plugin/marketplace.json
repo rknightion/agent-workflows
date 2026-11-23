@@ -1,6 +1,6 @@
 {
   "name": "rob-knight",
-  "description": "Rob Knight's agent loop (Loop v4) for Claude Code.",
+  "description": "Rob Knight's agent runs for Claude Code.",
   "owner": {
     "name": "Rob Knight"
   },
@@ -8,7 +8,7 @@
     {
       "name": "agent-workflows",
       "source": "./plugins/agent-workflows",
-      "description": "Prepare and run Loop v4: a root session works a tracker queue (GitHub issues or a Backlog.md board) through pinned subagent lanes until it writes its closeout."
+      "description": "Run mode: a root session works a goal or the ready GitHub issues through pinned subagent lanes, lands each pull request on its own and writes a closeout."
     }
   ]
 }
