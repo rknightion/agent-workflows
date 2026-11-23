@@ -27,10 +27,10 @@ plugin_root := "/absolute/path/to/agent-workflows"
 # The loop's tracker command: queue, view, create, claim, status, handoff, tick, close.
 [positional-arguments]
 tracker *args:
-    @python3 {{plugin_root}}/tools/tracker/tracker.py "$@"
+    @sh {{plugin_root}}/scripts/py3 {{plugin_root}}/tools/tracker/tracker.py "$@"
 ```
 
-The tool needs Python 3.12 or later: name that interpreter in the recipe if `python3` is older.
+The tool needs Python 3.15 or later; `scripts/py3` finds it and says how to get it if it is missing.
 
 The queue is the repository's open issues labelled `ready`; `blocked`, `needs-owner` and `p1` to `p3` are the
 other working labels, and the tool creates a missing one before it adds it. `close` posts an evidence comment

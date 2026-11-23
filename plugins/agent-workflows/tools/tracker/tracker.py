@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.15
 """The GitHub tracker: a thin shim over gh for issues and labels (README.md).
 
 A repository's queue is its open issues labelled ready. Writes go out as the ambient gh login: there is no GitHub

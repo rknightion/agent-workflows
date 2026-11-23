@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.15
 """dsreview: code review by DeepSeek Flash (Cloudflare AI Gateway or OpenRouter) with read-only repo tools.
 
 Reviews one candidate change against its brief and prints a JSON verdict:

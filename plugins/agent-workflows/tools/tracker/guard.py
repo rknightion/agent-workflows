@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.15
 """Refuse GitHub Project writes in a shell command: issues and labels are the tracker now, and nothing writes a Project.
 
 Issue writes (create, label, comment, close) are made with plain gh and are allowed; so is everything on a pull request.

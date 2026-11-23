@@ -1,5 +1,59 @@
-#!/usr/bin/env python3
-"""run-drive: the mechanical part of landing a run's pull requests, one pass per call.
+#!/bin/sh
+''''unset py u found
+ok() {
+  case "$1" in
+    /*) [ -x "$1" ] && "$1" -c 'import sys; sys.exit(sys.version_info < (3, 15))' 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+safe() {
+  case "$1" in /*) ;; *) return 1 ;; esac
+  d=$PWD
+  while :; do
+    case "$1" in "$d"/.venv/*) return 1 ;; esac
+    [ "$d" = / ] && break
+    d=${d%/*}
+    d=${d:-/}
+  done
+  case "$1" in "${VIRTUAL_ENV:-/nonexistent}"/*) return 1 ;; esac
+  ok "$1"
+}
+inpath() {
+  rest=$PATH:
+  while [ -n "$rest" ]; do
+    dir=${rest%%:*}
+    rest=${rest#*:}
+    case "$dir" in
+      /*) [ -f "$dir/$1" ] && [ -x "$dir/$1" ] && "$2" "$dir/$1" && { found=$dir/$1; return 0; } ;;
+    esac
+  done
+  return 1
+}
+inpath python3.15 ok && py=$found
+if [ -z "${py-}" ]; then
+  for p in /opt/homebrew/bin/python3.15 /home/linuxbrew/.linuxbrew/bin/python3.15; do
+    ok "$p" && { py=$p; break; }
+  done
+fi
+[ -n "${py-}" ] || { inpath python3 ok && py=$found; }
+[ -n "${py-}" ] && exec "$py" "$0" "$@"
+inpath uv true && u=$found
+case "${u-}" in
+  /*)
+    uvrun() { (cd / && VIRTUAL_ENV= CONDA_PREFIX= "$u" --directory / "$@" </dev/null); }
+    p=$(uvrun python find --no-project --no-config --no-python-downloads 3.15 2>/dev/null)
+    safe "$p" || { uvrun python install --no-config 3.15 >&2; p=$(uvrun python find --no-project --no-config --no-python-downloads 3.15 2>/dev/null); }
+    safe "$p" && exec "$p" "$0" "$@" ;;
+esac
+echo "${0##*/}: needs Python 3.15 or newer and found none. Install it with 'brew install python@3.15', or install uv (https://docs.astral.sh/uv/) and run this again." >&2
+exit 2 # '''
+# The block above is a shell launcher that is also a Python string: sh starts the tool on Python 3.15 before
+# Python parses the file, and Python reads the block as a string and ignores it. Keep it identical in every
+# bin/ Python tool and self-contained: no import and no sibling file. uv only resolves an interpreter, from /
+# with the environment and config cleared, and the tool then runs the path it gave back. Neither uv nor PATH
+# is allowed to reach into the caller's directory (a repository's .venv, or a ./python3.15 through a relative
+# or empty PATH element would run that repository's own files): PATH is walked by hand, absolute entries only.
+__doc__ = """run-drive: the mechanical part of landing a run's pull requests, one pass per call.
 
   run-drive open  --run <dir> --lane <id> --worktree <dir> --body <PR.md> --review "Review: ..."
                   [--reviewer codex|bugbot]... [--base <branch>] [--json]
@@ -22,6 +76,12 @@ import re
 import subprocess
 import sys
 import tempfile
+
+if sys.version_info < (3, 15):
+    print(f'run-drive: needs Python 3.15 or newer, found {sys.version.split()[0]}. '
+          "Install it with 'brew install python@3.15' or 'uv python install 3.15' and run this again.",
+          file=sys.stderr)
+    sys.exit(2)
 
 CODEX_BOT = 'chatgpt-codex-connector[bot]'
 BOTS = {'codex': CODEX_BOT, 'bugbot': 'cursor[bot]'}
@@ -497,13 +557,20 @@ def cmd_answer(a, st):
 def cmd_repair(a, st):
     e, notes = st.lane(a.lane), []
     v = view(e)
-    if v['state'] != 'OPEN' or v['headRefOid'] == e['head']:
+    # The same head is accepted once, to retry a Codex request that failed after the repair was recorded:
+    # the round is already counted and the head has no Codex request.
+    retry = v['headRefOid'] == e['head'] and e.get('repairs', 0) > 0 and not asks(e, 'codex', e['head'])
+    if v['state'] != 'OPEN' or (v['headRefOid'] == e['head'] and not retry):
         raise Fail(f'#{e["pr"]} is {v["state"]} at the recorded head {e["head"]}: push the repair first')
     if v.get('autoMergeRequest') is not None:
         disable_auto(e, notes)
-    e.update(head=v['headRefOid'], reviewers=['codex'], repairs=e.get('repairs', 0) + 1)
-    if e['repairs'] > 2:
-        notes.append(f'repair round {e["repairs"]}: the review rule caps a pull request at two')
+    e['reviewers'] = ['codex']
+    if retry:
+        notes.append(f'repair round {e["repairs"]} already counted: retrying the codex request for {e["head"][:10]}')
+    else:
+        e.update(head=v['headRefOid'], repairs=e.get('repairs', 0) + 1)
+        if e['repairs'] > 2:
+            notes.append(f'repair round {e["repairs"]}: the review rule caps a pull request at two')
     st.save()
     ask(e, 'codex', e['head'], notes)
     return {'lane': a.lane, 'pr': e['pr'], 'head': e['head'], 'notes': notes}, []

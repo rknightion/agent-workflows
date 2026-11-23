@@ -1,12 +1,6 @@
 """with-token: the JWT it signs, the calls it makes, and that the token reaches only the tracker's App requests."""
 import sys as _sys
 from pathlib import Path as _Path
-import unittest as _unittest
-
-# The tracker needs Python 3.12 or newer. Skip the whole module before any tracker module is imported, so an older
-# interpreter (the rest of this tree supports 3.9) reports a skip, not an import error.
-if _sys.version_info < (3, 12):
-    raise _unittest.SkipTest("the tracker needs Python 3.12 or newer")
 
 # The tracker's modules sit beside each other in tools/tracker, in this source tree or a published one.
 _TOOL = next(p for p in (_Path(__file__).resolve().parent.parent / "tools" / "tracker",

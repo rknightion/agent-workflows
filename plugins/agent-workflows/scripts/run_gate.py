@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.15
 """Run gate hooks for an unattended run root: `run_gate.py ask` (PreToolUse on AskUserQuestion)
 and `run_gate.py stop` (Stop).
 

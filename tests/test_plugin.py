@@ -41,11 +41,13 @@ class Manifests(unittest.TestCase):
         hooks = json.loads(read(PLUGIN, "hooks", "hooks.json"))["hooks"]
         commands = [h["command"] for event in hooks.values() for group in event for h in group["hooks"]]
         # The run gate, the lane-return record and the tmux session lifecycle hook must all ship.
-        self.assertEqual({re.search(r'scripts/[^"]+', c).group(0) for c in commands},
-                         {"scripts/run_gate.py", "scripts/lane_return.py", "scripts/tmux_title_state.sh"})
+        # The Python hooks name the launcher first, then their script.
+        self.assertEqual({s for c in commands for s in re.findall(r'scripts/[^"]+', c)},
+                         {"scripts/py3", "scripts/run_gate.py", "scripts/lane_return.py",
+                          "scripts/tmux_title_state.sh"})
         for command in commands:
-            script = re.search(r'"\$\{CLAUDE_PLUGIN_ROOT\}/([^"]+)"', command).group(1)
-            self.assertTrue(os.path.isfile(os.path.join(PLUGIN, script)), script)
+            for script in re.findall(r'"\$\{CLAUDE_PLUGIN_ROOT\}/([^"]+)"', command):
+                self.assertTrue(os.path.isfile(os.path.join(PLUGIN, script)), script)
 
     def test_the_bin_programs_are_executable(self):
         for name in ("run-check", "run-drive", "wait-until"):
@@ -78,7 +80,7 @@ class Programs(unittest.TestCase):
         self.assertIn("TIMED OUT", result.stderr)
 
     def test_wait_until_has_a_portable_interpreter_line(self):
-        self.assertEqual(read(BIN, "wait-until").splitlines()[0], "#!/usr/bin/env python3")
+        self.assertEqual(read(BIN, "wait-until").splitlines()[0], "#!/usr/bin/env python3.15")
 
 
 class LoopSkill(unittest.TestCase):

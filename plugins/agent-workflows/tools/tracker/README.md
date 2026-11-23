@@ -1,6 +1,6 @@
 # Tracker
 
-A thin shim over `gh` for GitHub issues and labels. `tracker.py` is stdlib Python (3.12 or newer); every call it
+A thin shim over `gh` for GitHub issues and labels. `tracker.py` is stdlib Python (3.15 or newer); every call it
 makes is `gh api` as the ambient `gh` login. There is no GitHub App, no token minting and no Project: nothing here
 reads or writes Project fields.
 
@@ -87,7 +87,7 @@ with plain `gh` are allowed. It reads shell structure (wrappers, `bash -c`, `$(.
 not run-time values; it is defence in depth, not a boundary. Wire it as a Claude Code `PreToolUse` hook on `Bash`:
 
 ```json
-{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 /path/to/tracker/guard.py"}]}]}}
+{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3.15 /path/to/tracker/guard.py"}]}]}}
 ```
 
 ## Exit codes

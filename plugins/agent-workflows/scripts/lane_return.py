@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.15
 """SubagentStop hook: record a run lane's return; never block it.
 
 A lane's return is plain text whose first line is `Status: complete|partial|blocked|failed`. This hook reads

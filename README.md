@@ -72,14 +72,17 @@ Everything lives in `plugins/agent-workflows/`.
 - Claude Code with plugin support (tested with 2.1.303). The skill relies on Claude Code
   substituting `${CLAUDE_PLUGIN_ROOT}` in skill text, and the protocol relies on the plugin `bin/`
   directory being on the Bash tool's PATH.
-- git, and Python 3.9 or later for the hooks and the programs in `bin/`.
+- git, and Python 3.15 or later for the hooks, the tools and the programs in `bin/`: `brew install python@3.15`,
+  or `uv python install 3.15` if you use uv. The hooks start through `scripts/py3`, which finds it on PATH, in
+  Homebrew or through uv. Without it each Python hook does nothing and shows a non-blocking hook error, so
+  your sessions keep working but the unattended run gate is off.
 - The GitHub CLI `gh`, signed in to the repository's host: `run-check` and `run-drive` read pull
   requests, checks and reviews through it, and the root opens issues and pull requests with it.
 - Something to do: what you name when you start a run, or open GitHub issues labelled `ready`.
 - Recommended: `just`, because the protocol's gate examples are `just` recipes (any gate command
   works).
-- For the tracker tool, only if you use it: Python 3.12 or later and `gh` signed in.
-- Optional: `dsreview` (in this plugin, Python 3.12 or later and a Cloudflare AI Gateway with a
+- For the tracker tool, only if you use it: `gh` signed in.
+- Optional: `dsreview` (in this plugin, needs a Cloudflare AI Gateway with a
   DeepSeek key), a cheap reviewer a root can run on a lane's change.
 
 ## Install
@@ -155,7 +158,7 @@ one skill, six agents and the hooks.
 `just check` runs the syntax checks and the tests in `tests/`, which drive the hooks over
 Claude-shaped input, check that `run-check` and `run-drive` start, run `wait-until` to a pass and to a
 timeout, and drive `dsreview` against a local fake gateway. It also runs the tracker tests, which drive
-the tracker against a stand-in `gh` (they skip below Python 3.12).
+the tracker against a stand-in `gh`.
 `claude plugin validate .` checks the manifests.
 
 ## Where this comes from

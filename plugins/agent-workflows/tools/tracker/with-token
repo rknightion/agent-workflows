@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.15
 """Retired App-token wrapper, kept so every tracker recipe that runs tracker-with-token keeps working.
 
 It reads no credentials and mints nothing: it runs the tracker with the same arguments as the ambient gh login.

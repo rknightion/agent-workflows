@@ -1,0 +1,93 @@
+#!/bin/sh
+# Start a program on Python 3.15, whatever the system python3 is.
+#
+#   sh py3 --hook script.py [args]   a Claude Code hook: never breaks the session
+#   sh py3 [python args]             a command-line tool: fails loudly
+#
+# Order: python3.15 on PATH, Homebrew's, then an interpreter uv already has (a tool may also let uv
+# download one; a hook never does, because it would stall the session). The first two cost no
+# subprocess.
+#
+# uv only resolves a path, from / (--directory, which UV_WORKING_DIR cannot override) with the
+# environment and config cleared, and never runs the program: from the caller's directory it would
+# pick up that repository's .venv or uv.toml and so execute a file from whatever repository the user
+# is in. A virtual environment is refused even if uv names one.
+#
+# A hook that cannot start exits 1: Claude Code shows that as a non-blocking error, hides stderr on
+# exit 0, and treats exit 2 as a block. So the hook's script is checked here (python exits 2 on a
+# missing file), uv's status is never passed on, and each hook registration ends in `|| exit 1`
+# because dash exits 2 when this file itself cannot be opened.
+
+hook=
+if [ "${1-}" = "--hook" ]; then
+	hook=1
+	shift
+	if [ ! -r "${1-}" ]; then
+		echo "agent-workflows: hook skipped, cannot read its script: ${1-none given}" >&2
+		exit 1
+	fi
+fi
+
+# PATH is walked by hand so that "." or an empty element can never run a file from the caller's
+# directory. Absolute directories only, and no subprocess.
+on_path() {
+	rest=${PATH-}:
+	while [ -n "$rest" ]; do
+		dir=${rest%%:*}
+		rest=${rest#*:}
+		case "$dir" in
+		/*)
+			if [ -f "$dir/$1" ] && [ -x "$dir/$1" ]; then
+				found=$dir/$1
+				return 0
+			fi
+			;;
+		esac
+	done
+	return 1
+}
+
+if on_path python3.15; then
+	exec "$found" "$@"
+fi
+for python in /opt/homebrew/bin/python3.15 /home/linuxbrew/.linuxbrew/bin/python3.15; do
+	if [ -x "$python" ]; then
+		exec "$python" "$@"
+	fi
+done
+
+uv_find() {
+	(cd / && VIRTUAL_ENV= CONDA_PREFIX= "$uv" --directory / python find --no-project --no-config --no-python-downloads 3.15) \
+		</dev/null 2>/dev/null
+}
+
+usable() {
+	case "$1" in
+	*/.venv/*) return 1 ;;
+	/*) ;;
+	*) return 1 ;;
+	esac
+	[ -x "$1" ] && [ ! -e "${1%/bin/*}/pyvenv.cfg" ]
+}
+
+if on_path uv; then
+	uv=$found
+	python=$(uv_find)
+	if usable "$python"; then
+		exec "$python" "$@"
+	fi
+	if [ -z "$hook" ]; then
+		(cd / && VIRTUAL_ENV= CONDA_PREFIX= "$uv" --directory / python install --no-config 3.15) </dev/null >/dev/null 2>&1
+		python=$(uv_find)
+		if usable "$python"; then
+			exec "$python" "$@"
+		fi
+	fi
+fi
+
+if [ -n "$hook" ]; then
+	echo "agent-workflows: hook skipped, no Python 3.15 found (brew install python@3.15, or uv python install 3.15)" >&2
+	exit 1
+fi
+echo "agent-workflows: needs Python 3.15. Install it with 'brew install python@3.15', or install uv (https://docs.astral.sh/uv/) and run 'uv python install 3.15'." >&2
+exit 127
