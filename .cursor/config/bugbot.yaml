@@ -1,0 +1,21 @@
+version: 1
+triggers:
+  drafts: false
+  frequency: everyPush
+review:
+  effort: smart
+  incremental: true
+  smartPrompt: |
+    This repository is a Claude Code plugin marketplace written in Python 3.15 using only the standard
+    library, and shell for the launcher. Spend the most effort on the run gate and lane record hooks
+    (plugins/agent-workflows/scripts), the run-check and run-drive programs that decide whether a pull
+    request may land and enable auto-merge, the tracker shim over gh, and the py3 launcher. A bug there can
+    merge the wrong change, block a session, or break a hook. Check that a hook never exits 2 by accident
+    and always lets the call or the stop through on its own fault, that nothing merges or pushes without
+    the documented checks, that every external call has a timeout, and that a new behaviour has a test
+    that fails without it. Prose and manifest edits need a light pass: check that paths, version numbers
+    and the six agent roles agree with the files they name. Do not comment on style or formatting.
+prSummary:
+  mode: disabled
+autofix:
+  mode: disabled
