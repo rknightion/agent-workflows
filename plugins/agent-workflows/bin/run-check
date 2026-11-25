@@ -415,6 +415,24 @@ def reap(a):
     return CLEAR
 
 
+RESUME_CAP, LOG_CAP = 12000, 65536
+
+
+def run_folder_findings(run_dir):
+    """What keeps the run folder from staying small: sweep snapshots, a long RESUME.md, copied CI logs."""
+    found = []
+    names = sorted(os.listdir(run_dir)) if os.path.isdir(run_dir) else []
+    snaps = [n for n in names if re.fullmatch(r'sweep-.*\.json', n)]
+    if snaps:
+        found.append(f'run folder: {len(snaps)} sweep-*.json snapshots; keep one rolling sweep.json')
+    for name, cap, fix in [('RESUME.md', RESUME_CAP, 'move history to LOG.md')] + [
+            (n, LOG_CAP, 'reference CI logs by run id') for n in names if n.endswith('.log')]:
+        size = os.path.getsize(os.path.join(run_dir, name)) if name in names else 0
+        if size > cap:
+            found.append(f'run folder: {name} is {size} bytes, over {cap}; {fix}')
+    return found
+
+
 def close(a):
     a.prefix = run_prefix(a)
     if not a.prefix.strip('/'):
@@ -453,6 +471,7 @@ def close(a):
                 why = (f'commits after the head of {kind} pull request #{pr["number"]}' if kind else
                        f'pull request #{pr["number"]} {pr["state"].lower()}, not a draft' if pr else 'no pull request')
                 blocking.append(f'unlanded with nothing kept: {b} ({why}, no patch at {patch})')
+    blocking += run_folder_findings(run_dir)
     for title, items in (('merged', merged), ('unlanded', kept), ('in the way', blocking)):
         print(f'{title}:')
         for item in items or ['none']:

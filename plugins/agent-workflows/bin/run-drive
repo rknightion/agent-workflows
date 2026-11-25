@@ -61,7 +61,8 @@ __doc__ = """run-drive: the mechanical part of landing a run's pull requests, on
   run-drive answer --run <dir> --lane <id> --match <regex> --reply <text> [--json]
   run-drive repair-pushed --run <dir> --lane <id> [--json]
 
-State is <run>/state.json; everything else is read live from git and gh on every call. Each verb
+State is <run>/state.json; sweep also replaces <run>/sweep.json with its latest result, so the run folder
+holds one sweep file however many sweeps run. Everything else is read live from git and gh on every call. Each verb
 does one pass and exits 0, or 2 on a usage or tool error; it never sleeps or waits. It never
 merges: sweep enables auto-merge with --match-head-commit only when every reviewer the head needs
 has a verdict on that exact head, no review thread is unresolved, no check is failing, and
@@ -189,6 +190,19 @@ class State:
             json.dump(self.data, f, indent=2, sort_keys=True)
             f.write('\n')
         os.replace(tmp, self.path)
+
+
+def _save_sweep(self, result, needs):
+    """<run>/sweep.json: the latest sweep only, replaced atomically; never one file per sweep."""
+    path = os.path.join(os.path.dirname(self.path), 'sweep.json')
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.sweep.', suffix='.tmp')
+    with os.fdopen(fd, 'w') as f:
+        json.dump({'at': iso(now()), 'result': result, 'needs_you': needs}, f, indent=2, sort_keys=True)
+        f.write('\n')
+    os.replace(tmp, path)
+
+
+State.save_sweep = _save_sweep
 
 
 def asks(e, reviewer, head):
@@ -623,6 +637,8 @@ def main(argv=None):
         fn = {'open': cmd_open, 'sweep': cmd_sweep, 'answer': cmd_answer, 'repair-pushed': cmd_repair}[a.verb]
         result, needs = fn(a, st)
         st.save()
+        if a.verb == 'sweep':
+            st.save_sweep(result, needs)
     except Fail as e:
         if a.json:
             print(json.dumps({'verb': a.verb, 'error': str(e)}))

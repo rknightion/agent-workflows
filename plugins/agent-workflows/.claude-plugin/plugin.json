@@ -1,6 +1,6 @@
 {
   "name": "agent-workflows",
-  "version": "4.2.0",
+  "version": "4.2.1",
   "description": "Run mode for Claude Code: the loop skill that starts a run in your session, six pinned lane agents, the unattended run gate and lane-return hooks, run-check, run-drive, wait-until, the tracker and dsreview tools and the protocol documents.",
   "author": {
     "name": "Rob Knight",
