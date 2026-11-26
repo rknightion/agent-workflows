@@ -7,7 +7,7 @@ plugin marketplace that packages what makes that work, plus the one-page protoco
 the root follows.
 
 The write-up is at https://rob-knight.com/loop/ and the rendered protocol is at
-https://rob-knight.com/reference/.
+https://rob-knight.com/loop/protocol/.
 
 ## What the plugin contains
 
@@ -136,8 +136,8 @@ one skill, six agents and the hooks.
    files in `codex/run-<YYYYMMDD>-<n>/` and starts work.
 2. When you leave, say so: the root writes `UNATTENDED` in the run folder, and from then on parks its
    questions instead of asking. Tell it when you are back.
-3. The run stops when the goal is met or the queue is empty, with every worktree gone and a
-   `CLOSEOUT.md` in the run folder.
+3. The run stops when the goal is met, the queue is empty or three hours pass without a merge.
+   Remove the run's worktrees and write `CLOSEOUT.md` in the run folder.
 
 ## What the hooks write outside the repository
 

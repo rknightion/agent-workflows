@@ -45,4 +45,4 @@ command and the optional guard that refuses raw `gh` writes to a GitHub Project.
 - Names from the author's setup (an operator, a review table in the agent home, a remote gate) are
   kept generic. Adapt or skip those steps.
 
-The same documents are rendered at https://rob-knight.com/reference/.
+The same documents are rendered at https://rob-knight.com/loop/protocol/.
